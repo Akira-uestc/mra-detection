@@ -258,11 +258,11 @@ class AGF_ADNet(nn.Module):
 
 def train_agf_adnet():
     # 参数设置
-    SEQ_LEN = 30 # 窗口长度
+    SEQ_LEN = 1 # 窗口长度
     BATCH_SIZE = 32
     LR = 1e-3
     EPOCHS = 50
-    LAMBDA_SPARSITY = 0.01
+    LAMBDA_SPARSITY = 0.5
     
     # 1. 加载数据
     builder = TEPDatasetBuilder(seq_len=SEQ_LEN, stride=5) # stride设大一点避免数据过多
@@ -272,11 +272,11 @@ def train_agf_adnet():
 
     # 划分训练集（正常数据）和测试集（正常+异常）
     # 前1500是正常，后1500是异常
-    train_data = raw_data[:1200]
-    train_mask = mask_obs[:1200]
+    train_data = raw_data[:1500]
+    train_mask = mask_obs[:1500]
     
-    test_data = raw_data[1200:] # 包含部分正常和全部异常
-    test_mask = mask_obs[1200:]
+    test_data = raw_data[1500:] # 包含部分正常和全部异常
+    test_mask = mask_obs[1500:]
     
     # 创建窗口
     X_train, M_train = builder.create_windows(train_data, train_mask)
