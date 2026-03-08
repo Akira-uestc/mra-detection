@@ -1,0 +1,632 @@
+# 核心张量库。
+import torch
+# 神经网络层与模块。
+import torch.nn as nn
+# 函数式工具（激活、填充等）。
+import torch.nn.functional as F
+# 优化器。
+import torch.optim as optim
+# 数据集与小批量加载工具。
+from torch.utils.data import DataLoader, TensorDataset
+# 表格数据加载与处理。
+import pandas as pd
+# 数值数组运算。
+import numpy as np
+# 特征标准化工具。
+from sklearn.preprocessing import StandardScaler
+# 用于异常分数可视化的绘图库。
+import matplotlib.pyplot as plt
+# 文件存在性检查。
+import os
+
+# ==========================================
+# 1. 数据集构建器（未改动）
+# ==========================================
+class TEPDatasetBuilder:
+    def __init__(self, seq_len=60, stride=1):
+        # 每个窗口包含的时间步数。
+        self.seq_len = seq_len
+        # 相邻窗口之间的步长。
+        self.stride = stride
+        # 对每个传感器通道做标准化。
+        self.scaler = StandardScaler()
+
+    def load_data(self, file_path):
+        # 若文件不存在则回退到合成数据。
+        if not os.path.exists(file_path):
+            print(f"Warning: {file_path} not found. Generating mock data.")
+            return self._generate_mock_data()
+            
+        # 读取 CSV 到 DataFrame。
+        df = pd.read_csv(file_path)
+        # 保留前缀为 xmeas_ 的前 41 个测量列。
+        data = df.filter(like="xmeas_").iloc[:, :41].to_numpy()
+        # 1 表示观测到，0 表示缺失。
+        mask = (~np.isnan(data)).astype(np.float32)
+        # 标准化前先将 NaN 替换为 0。
+        data_filled = np.nan_to_num(data, nan=0.0)
+        # 在前半段数据上拟合标准化器（参考区间）。
+        self.scaler.fit(data_filled[:1500])
+        # 用已拟合参数变换全量序列。
+        data_scaled = self.scaler.transform(data_filled)
+        # 返回 float32，便于 PyTorch 使用。
+        return data_scaled.astype(np.float32), mask
+
+    def _generate_mock_data(self):
+        # 合成时间轴。
+        t = np.linspace(0, 10, 3000)
+        # 41 个通道的数据占位数组。
+        data = np.zeros((3000, 41))
+        for i in range(41):
+            # 按通道索引交替使用高频/低频。
+            freq = 50 if i % 2 == 0 else 0.5
+            # 每个通道随机相位偏移。
+            phase = np.random.rand() * 2 * np.pi
+            # 基础正弦波 + 谐波分量。
+            signal = np.sin(2 * np.pi * freq * t + phase) + \
+                     0.1 * np.sin(2 * np.pi * freq * 3 * t) 
+            # 叠加高斯噪声。
+            data[:, i] = signal + np.random.randn(3000) * 0.05
+            
+        # 初始为全观测掩码。
+        mask = np.ones_like(data)
+        for col in range(10, 41):
+            # 为后续通道模拟周期性缺失。
+            mask[::3, col] = 0
+        
+        # 返回 float32 以兼容模型输入。
+        return data.astype(np.float32), mask.astype(np.float32)
+
+#    旧版 create_windows 实现（保留作参考）：
+#    def create_windows(self, data, mask):
+#        X, M = [], []
+#        if len(data) < self.seq_len:
+#            return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
+#        for i in range(0, len(data) - self.seq_len + 1, self.stride):
+#            X.append(data[i : i + self.seq_len])
+#            M.append(mask[i : i + self.seq_len])
+#        return np.stack(X), np.stack(M)
+
+    def create_windows(self, data, mask):
+        # 保存数据窗口及对应掩码窗口。
+        X, M = [], []
+        # 输入序列的总时间步数。
+        n = len(data)
+        
+        # 防御式处理：空输入直接返回空窗口。
+        if n == 0:
+            return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
+    
+        # 按设定步长为每个时间步构建一个窗口。
+        for i in range(0, n, self.stride):
+            if i < self.seq_len:
+                # 通过重复首样本进行前向填充。
+                # 使窗口长度达到 seq_len 所需的填充长度。
+                pad_len = self.seq_len - i - 1
+                # 将前填充与现有前缀片段拼接。
+                window_data = np.concatenate([
+                    np.tile(data[0:1], (pad_len, 1)),  # 重复首样本
+                    data[0 : i + 1]
+                ], axis=0)
+                # 对掩码采用相同的前填充策略。
+                window_mask = np.concatenate([
+                    np.tile(mask[0:1], (pad_len, 1)),
+                    mask[0 : i + 1]
+                ], axis=0)
+            else:
+                # 常规回看：取前 seq_len 个样本。
+                window_data = data[i - self.seq_len + 1 : i + 1]
+                window_mask = mask[i - self.seq_len + 1 : i + 1]
+    
+            # 追加一组对齐的数据/掩码窗口。
+            X.append(window_data)
+            M.append(window_mask)
+    
+        # 将窗口列表堆叠为张量：(num_windows, seq_len, 41)。
+        return np.stack(X), np.stack(M)
+
+
+# ==========================================
+# 2. 修复版：增强图学习器
+# ==========================================
+class GraphLearner(nn.Module):
+    """
+    修复点：移除 softmax 以允许真正的稀疏约束。
+    改为 ReLU 后做按行归一化。
+    """
+    def __init__(self, num_nodes, embed_dim=16, alpha=3.0):
+        super().__init__()
+        # 可学习的源节点嵌入。
+        self.E1 = nn.Parameter(torch.randn(num_nodes, embed_dim))
+        # 可学习的目标节点嵌入。
+        self.E2 = nn.Parameter(torch.randn(num_nodes, embed_dim))
+        # 控制 tanh 的饱和程度与陡峭度。
+        self.alpha = alpha
+
+    def forward(self):
+        # 压缩后的源节点嵌入。
+        M1 = torch.tanh(self.alpha * self.E1)
+        # 压缩后的目标节点嵌入。
+        M2 = torch.tanh(self.alpha * self.E2)
+        # 计算两两相似度/关联度。
+        A = torch.matmul(M1, M2.T)
+        # 仅保留非负边权。
+        A = F.relu(A)
+        
+        # 修复点：使用按行归一化替代 softmax。
+        # 这样既能保持权重归一化，又能让 L1 稀疏正则生效。
+        # 将每一行归一化到和约为 1。
+        A = A / (A.sum(dim=-1, keepdim=True) + 1e-8)
+        return A
+
+# ==========================================
+# 3. GCN 层（未改动）
+# ==========================================
+class GCNLayer(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        # 节点级特征线性变换。
+        self.linear = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x, adj):
+        # x: (B, S, N, F)
+        # 在特征维度上做线性变换。
+        x = self.linear(x)
+        # 使用共享邻接矩阵做图传播。
+        out = torch.einsum("nm,bsmd->bsnd", adj, x)
+        return out
+
+# ==========================================
+# 4. 修复版：带正确因果填充的多尺度 TCN
+# ==========================================
+class MultiScaleTCN(nn.Module):
+    """
+    修复点：使用正确的因果填充（仅左侧），防止看到未来信息。
+    对于重建任务也可使用双向版本；这里实现的是因果版本。
+    """
+    def __init__(self, num_nodes, kernel_sizes=[3, 5, 7], causal=True):
+        super().__init__()
+        # 是否禁止访问未来时间步。
+        self.causal = causal
+        # 存放多尺度深度可分离时间卷积的容器。
+        self.convs = nn.ModuleList()
+        # 并行时间滤波器使用的卷积核尺寸。
+        self.kernel_sizes = kernel_sizes
+        
+        for k in kernel_sizes:
+            # 卷积层不设 padding，改为手动填充以支持因果策略。
+            self.convs.append(
+                nn.Conv1d(
+                    num_nodes, num_nodes, 
+                    kernel_size=k, 
+                    padding=0,  # 手动填充
+                    groups=num_nodes
+                )
+            )
+        
+        # 多尺度输出融合。
+        # 学习在尺度维上的加权组合。
+        self.fusion = nn.Linear(len(kernel_sizes), 1)
+
+    def forward(self, x):
+        # x: (B, N, S)
+        # 为每个卷积核尺寸保留一份输出。
+        outputs = []
+        for conv, k in zip(self.convs, self.kernel_sizes):
+            if self.causal:
+                # 仅左侧填充（因果）。
+                padded = F.pad(x, (k-1, 0))
+            else:
+                # 对称填充（非因果，常用于重建）。
+                padded = F.pad(x, ((k-1)//2, k//2))
+            
+            # 深度可分离时间滤波。
+            out = conv(padded)
+            outputs.append(out)  # (B, N, S)
+        
+        # 堆叠后形状：(B, N, S, K)。
+        out_stack = torch.stack(outputs, dim=-1)
+        # 按尺度加权求和，得到：(B, N, S)。
+        out = self.fusion(out_stack).squeeze(-1)
+        return out
+
+# ==========================================
+# 5. 修复版：带正确注意力的频域插补器
+# ==========================================
+class FrequencyImputer(nn.Module):
+    """
+    修复点：在频域特征上实现了正确的注意力机制。
+    先计算注意力权重，再作用到频域增强特征上。
+    """
+    def __init__(self, seq_len, num_nodes=41):
+        super().__init__()
+        # rFFT 在频率轴上的输出长度。
+        self.freq_len = seq_len // 2 + 1
+        # 传感器/节点数量。
+        self.num_nodes = num_nodes
+        
+        # 注意力网络：学习哪些频率更重要。
+        self.attention = nn.Sequential(
+            nn.Linear(self.freq_len * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.freq_len),
+            nn.Sigmoid(),  # 注意力权重范围为 [0, 1]
+        )
+        
+        # 频域增强网络。
+        self.freq_enhance = nn.Sequential(
+            nn.Linear(self.freq_len * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.freq_len * 2),
+        )
+
+    def forward(self, x):
+        # x: (B, S, N) -> 为 FFT 变换为 (B, N, S)
+        x_perm = x.permute(0, 2, 1)  # (B, N, S)
+        
+        # FFT 变换到频域。
+        xf = torch.fft.rfft(x_perm, dim=2)  # (B, N, F) 复数
+        
+        # 提取幅值与相位。
+        # 显式保留中间量，便于阅读与调试。
+        magnitude = torch.abs(xf)  # (B, N, F)
+        # 相位可用于后续约束或正则项扩展。
+        phase = torch.angle(xf)  # (B, N, F)
+        
+        # 拼接实部与虚部用于特征提取。
+        real, imag = xf.real, xf.imag
+        feat = torch.cat([real, imag], dim=-1)  # (B, N, 2F)
+        
+        # 按节点计算注意力权重。
+        att_weights = self.attention(feat)  # (B, N, F)
+        
+        # 增强频域特征。
+        feat_enhanced = self.freq_enhance(feat)  # (B, N, 2F)
+        real_enh = feat_enhanced[..., :self.freq_len]
+        imag_enh = feat_enhanced[..., self.freq_len:]
+        
+        # 将注意力作用到增强后的特征上。
+        real_attended = real_enh * att_weights
+        imag_attended = imag_enh * att_weights
+        
+        # 重建复数频谱。
+        xf_enhanced = torch.complex(real_attended, imag_attended)
+        
+        # IFFT 回到时域。
+        x_rec = torch.fft.irfft(xf_enhanced, n=x.size(1), dim=2)  # (B, N, S)
+        
+        # 变换回 (B, S, N)。
+        return x_rec.permute(0, 2, 1)
+
+# ==========================================
+# 6. 修复版：带时序上下文的门控融合
+# ==========================================
+class GatedFusion(nn.Module):
+    """
+    修复点：使用时间卷积计算门控，以捕获时序上下文。
+    """
+    def __init__(self, num_nodes, seq_len):
+        super().__init__()
+        # 使用 1D 卷积在门控计算中捕获时间模式。
+        self.gate_net = nn.Sequential(
+            nn.Conv1d(num_nodes * 2, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, num_nodes, kernel_size=1),
+            nn.Sigmoid()
+        )
+        # 对每个时间步的融合特征做归一化。
+        self.norm = nn.LayerNorm(num_nodes)
+
+    def forward(self, h_time, h_freq):
+        # h_time, h_freq: (B, S, N)
+        # 为 conv1d 变换到 (B, N, S)。
+        h_time_perm = h_time.permute(0, 2, 1)
+        h_freq_perm = h_freq.permute(0, 2, 1)
+        
+        combined = torch.cat([h_time_perm, h_freq_perm], dim=1)  # (B, 2N, S)
+        # 计算 [0, 1] 区间内的门控值。
+        z = self.gate_net(combined)  # (B, N, S)
+        z = z.permute(0, 2, 1)  # (B, S, N)
+        
+        # 门控融合。
+        h = z * h_time + (1 - z) * h_freq
+        return self.norm(h)
+
+# ==========================================
+# 7. AGF-ADNet（修复后集成）
+# ==========================================
+class AGF_ADNet(nn.Module):
+    def __init__(self, num_nodes=41, seq_len=60, d_model=64):
+        super().__init__()
+        # 传感器通道数。
+        self.num_nodes = num_nodes
+        # 模型处理的序列长度。
+        self.seq_len = seq_len
+        
+        # 学习由数据驱动的传感器图结构。
+        self.graph = GraphLearner(num_nodes)
+        
+        # 时域分支。
+        self.gcn = GCNLayer(1, 1)
+        self.tcn = MultiScaleTCN(num_nodes, kernel_sizes=[3, 5, 9], causal=False)  # 用于重建的非因果版本
+        self.time_norm = nn.LayerNorm(num_nodes)
+        
+        # 频域分支。
+        self.freq = FrequencyImputer(seq_len, num_nodes)
+        self.freq_norm = nn.LayerNorm(num_nodes)
+        
+        # 融合层：保留门控融合（比 Conv1x1 更强）。
+        self.fusion = GatedFusion(num_nodes, seq_len)
+
+        # 带输入投影的 Transformer。
+        # 将每个时间步的多节点特征投影到 d_model 维。
+        self.input_proj = nn.Linear(num_nodes, d_model)
+        # Transformer token 的可学习位置编码。
+        self.pos_enc = nn.Parameter(torch.randn(1, seq_len, d_model))
+        
+        encoder = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=4, 
+            dim_feedforward=128, 
+            batch_first=True,
+            dropout=0.1
+        )
+        self.transformer = nn.TransformerEncoder(encoder, num_layers=2)
+        self.output_proj = nn.Linear(d_model, num_nodes)
+
+    def forward(self, x, mask):
+        # x: (B, S, N)
+        # 根据节点嵌入学习邻接矩阵。
+        adj = self.graph()
+
+        # 1. 时域分支。
+        x_gcn = self.gcn(x.unsqueeze(-1), adj).squeeze(-1)  # (B, S, N)
+        x_gcn = self.time_norm(x_gcn)
+        
+        x_tcn = self.tcn(x.permute(0, 2, 1)).permute(0, 2, 1)  # (B, S, N)
+        # 融合图传播特征与时序卷积特征。
+        h_time = x_gcn + x_tcn
+
+        # 2. 频域分支。
+        h_freq = self.freq(x)  # (B, S, N)
+        # 稳定频域分支输出分布。
+        h_freq = self.freq_norm(h_freq)
+
+        # 3. 门控融合。
+        x_imp = self.fusion(h_time, h_freq)  # (B, S, N)
+
+        # 4. 插补：用插补值填充缺失位置。
+        x_filled = x * mask + x_imp * (1 - mask)
+
+        # 5. Transformer 重建。
+        z = self.input_proj(x_filled) + self.pos_enc  # (B, S, d_model)
+        # 在时间维上进行序列建模。
+        z = self.transformer(z)
+        x_rec = self.output_proj(z)  # (B, S, N)
+
+        return x_rec, adj, x_imp
+
+# ==========================================
+# 8. 修复版：双域损失函数
+# ==========================================
+def dual_domain_loss(x_rec, x_true, mask, adj, freq_weight=0.1, sparsity_weight=0.01):
+    """
+    修复点：
+    1. 在完整重建信号与真值之间计算频域损失。
+    2. 对掩码位置做正确处理。
+    """
+    # 1. 时域 MSE（仅在观测到的位置计算）。
+    # 掩码保证只在有真值的位置比较误差。
+    recon_loss = ((x_rec - x_true) * mask).pow(2).sum() / (mask.sum() + 1e-8)
+    
+    # 2. 修复点：频域损失（基于完整信号）。
+    # 只在有足够真值的样本上计算。
+    # 对重建信号与真值做 FFT 并比较频谱。
+    # 在完整序列维上计算更稳定。
+    with torch.no_grad():
+        # 筛选观测比例足够高的样本。
+        obs_ratio = mask.mean(dim=[1, 2])  # (B,)
+        valid_samples = obs_ratio > 0.5  # 仅使用观测比例 >50% 的样本
+    
+    if valid_samples.sum() > 0:
+        x_rec_valid = x_rec[valid_samples].permute(0, 2, 1)  # (B', N, S)
+        x_true_valid = x_true[valid_samples].permute(0, 2, 1)
+        
+        fft_rec = torch.fft.rfft(x_rec_valid, dim=2)
+        fft_true = torch.fft.rfft(x_true_valid, dim=2)
+        
+        # 比较幅值频谱差异。
+        freq_loss = (fft_rec.abs() - fft_true.abs()).pow(2).mean()
+    else:
+        freq_loss = torch.tensor(0.0, device=x_rec.device)
+    
+    # 3. 修复点：图稀疏项（L1），在归一化邻接矩阵下可生效。
+    # 鼓励学习到更稀疏的图连接。
+    sparsity_loss = torch.mean(torch.abs(adj))
+    
+    return recon_loss + freq_weight * freq_loss + sparsity_weight * sparsity_loss
+
+# ==========================================
+# 9. 修复版：训练流程
+# ==========================================
+def train():
+    # 滑动窗口长度。
+    SEQ_LEN = 60
+    # 用于加载、标准化与切窗的数据工具。
+    builder = TEPDatasetBuilder(SEQ_LEN)
+    # 加载 TEP 数据；若缺失则回退到模拟数据。
+    data, mask = builder.load_data("./TEP_3000_Block_Split.csv")
+    
+    # 按时间顺序 50/50 划分训练与测试。
+    split = int(len(data)*0.5)
+    # 构建训练窗口。
+    Xtr, Mtr = builder.create_windows(data[:split], mask[:split])
+    # 构建测试窗口。
+    Xte, Mte = builder.create_windows(data[split:], mask[split:])
+
+    # 防御：训练集为空时直接退出。
+    if len(Xtr) == 0: 
+        print("No training data available!")
+        return
+
+    # 训练用小批量数据加载器。
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(Xtr), torch.tensor(Mtr)), 
+        batch_size=32, shuffle=True
+    )
+
+    # 优先使用 GPU。
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+    
+    # 构建模型并迁移到目标设备。
+    model = AGF_ADNet(seq_len=SEQ_LEN).to(device)
+    # 对全部可训练参数使用 Adam。
+    opt = optim.Adam(model.parameters(), lr=1e-3)
+    # 当损失进入平台期时降低学习率。
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10)
+
+    print("Starting training...")
+    for epoch in range(100):
+        # 启用训练模式（dropout 等）。
+        model.train()
+        # 记录 epoch 平均损失。
+        total_loss = 0
+        
+        for x, m in train_loader:
+            # 将批数据迁移到 CPU/GPU。
+            x, m = x.to(device), m.to(device)
+            # 清空上一轮梯度缓存。
+            opt.zero_grad()
+            
+            # 修复点：自监督随机掩码。
+            # 随机丢弃 10% 的已观测数据用于自监督训练。
+            rand_drop_prob = 0.1
+            # 为每个元素采样 Bernoulli 保留掩码。
+            rand_mask = torch.bernoulli(torch.full_like(m, 1 - rand_drop_prob))
+            
+            # 输入掩码 = 原始观测掩码去掉随机丢弃部分。
+            m_input = m * rand_mask
+            # 将输入中被随机丢弃的位置置零。
+            x_input = x * m_input
+            
+            # 前向传播。
+            x_rec, adj, _ = model(x_input, m_input)
+
+            # 修复点：在“所有原始可观测位置”上计算损失。
+            # 既包含当前可见位置（m_input==1），
+            # 也包含人工丢弃位置（m==1 且 m_input==0），
+            # 从而让模型学会恢复被丢弃的值。
+            loss = dual_domain_loss(x_rec, x, m, adj)
+            
+            # 反向传播梯度。
+            loss.backward()
+            # 梯度裁剪以稳定训练，避免梯度爆炸。
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 执行参数更新。
+            opt.step()
+            # 累加标量损失。
+            total_loss += loss.item()
+
+        # 计算所有训练批次的平均损失。
+        avg_loss = total_loss / len(train_loader)
+        # 用当前 epoch 损失更新学习率调度器。
+        scheduler.step(avg_loss)
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}, LR: {opt.param_groups[0]['lr']:.6f}")
+
+    print("\nTraining completed. Evaluating on test set...")
+    
+    # 评估阶段。
+    # 切换到评估模式（不更新 dropout/batchnorm 状态）。
+    model.eval()
+    # 收集每个窗口的异常分数。
+    scores = []
+    with torch.no_grad():
+        # 测试集小批量加载器。
+        test_loader = DataLoader(
+            TensorDataset(torch.tensor(Xte), torch.tensor(Mte)), 
+            batch_size=32
+        )
+        for x, m in test_loader:
+            # 将测试批迁移到同一设备。
+            x, m = x.to(device), m.to(device)
+            # 重建完整序列。
+            xr, _, _ = model(x, m)
+            
+            # 异常分数：在观测位置上的 MSE。
+            sq_err = ((xr - x) * m).pow(2).sum(dim=[1, 2])
+            # 按每个样本的观测点数量归一化。
+            obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
+            scores.extend((sq_err / obs_cnt).cpu().numpy())
+
+    # 转为 numpy 数组，便于统计与绘图。
+    scores = np.array(scores)
+    # threshold = np.mean(scores) + 3 * np.std(scores)
+    # 简单阈值基线：使用均值。
+    threshold = np.mean(scores)
+    
+    print(f"\nAnomaly Detection Results:")
+    print(f"Mean Score: {np.mean(scores):.6f}")
+    print(f"Std Score: {np.std(scores):.6f}")
+    print(f"Threshold (mean + 3*std): {threshold:.6f}")
+    print(f"Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
+
+    # 可视化。
+    # plt.figure(figsize=(12, 5))  # 大图布局示例
+    # 
+    # plt.subplot(1, 2, 1)
+    # plt.plot(scores, label='Anomaly Score', alpha=0.7)  # 异常分数曲线
+    # plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')  # 阈值线
+    # plt.xlabel('Sample Index')  # X 轴：样本索引
+    # plt.ylabel('Reconstruction Error')  # Y 轴：重建误差
+    # plt.title('AGF-ADNet Anomaly Detection (Fixed)')  # 标题
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # 
+    # plt.subplot(1, 2, 2)
+    # plt.hist(scores, bins=50, alpha=0.7, edgecolor='black')  # 分数直方图
+    # plt.axvline(x=threshold, color='r', linestyle='--', label='Threshold')  # 阈值竖线
+    # plt.xlabel('Anomaly Score')  # X 轴：异常分数
+    # plt.ylabel('Frequency')  # Y 轴：频次
+    # plt.title('Score Distribution')  # 标题：分数分布
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # 
+    # plt.tight_layout()
+    # plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    # print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
+    # plt.show()
+    
+    plt.figure(figsize=(6, 5))
+    
+    # 绘制异常分数曲线。
+    plt.plot(scores, label='Anomaly Score', alpha=0.7)
+    # 绘制水平阈值线。
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
+    # X 轴标签。
+    plt.xlabel('Sample Index')
+    # Y 轴标签。
+    plt.ylabel('Reconstruction Error')
+    # 图标题。
+    plt.title('AGF-ADNet Anomaly Detection')
+    # 显示图例。
+    plt.legend()
+    # 绘制浅色网格。
+    plt.grid(True, alpha=0.3)
+   
+    # 防止标签被裁切。
+    plt.tight_layout()
+    # 将图像保存到项目路径。
+    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
+    # 在交互环境中显示图像。
+    plt.show()
+    
+    # 返回训练后的模型与测试分数。
+    return model, scores
+
+if __name__ == "__main__":
+    # 直接运行脚本时，执行完整训练与评估。
+    model, scores = train()
