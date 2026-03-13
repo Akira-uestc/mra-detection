@@ -8,6 +8,8 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 
+plt.rcParams['font.sans-serif'] = ['SimHei']
+
 # ==========================================
 # 1. 数据读取函数
 # ==========================================
@@ -27,13 +29,31 @@ def generate_mask_matrix():
 # ==========================================
 # 2. 数据预处理
 # ==========================================
-def create_sequences(data, seq_length):
-    """将2D数据转换为3D序列数据 (Samples, Seq_Len, Features)"""
+def create_sequences(data, seq_length, stride=1):
+    """
+    将2D数据转换为3D序列数据 (Samples, Seq_Len, Features)
+    参考 mra.py 的滑窗逻辑：
+    - 每个时间点都有一个窗口
+    - 前期样本不足 seq_len 时用首条样本前置填充
+    """
     xs = []
-    for i in range(len(data) - seq_length + 1):
-        x = data[i:(i + seq_length)]
+    n = len(data)
+    if n == 0:
+        return np.zeros((0, seq_length, data.shape[1]), dtype=data.dtype)
+
+    for i in range(0, n, stride):
+        if i < seq_length:
+            pad_len = seq_length - i - 1
+            if pad_len > 0:
+                pad = np.tile(data[0:1], (pad_len, 1))
+                x = np.concatenate([pad, data[0:i + 1]], axis=0)
+            else:
+                x = data[0:i + 1]
+        else:
+            x = data[i - seq_length + 1:i + 1]
         xs.append(x)
-    return np.array(xs)
+
+    return np.stack(xs)
 
 # 读取数据
 raw_data, mask = generate_mask_matrix()
@@ -62,8 +82,8 @@ if raw_data is not None:
     # --- 创建时间序列窗口 ---
     SEQ_LENGTH = 10
     
-    X_train = create_sequences(train_data_norm, SEQ_LENGTH)
-    X_test = create_sequences(test_data_norm, SEQ_LENGTH)
+    X_train = create_sequences(train_data_norm, SEQ_LENGTH, stride=1)
+    X_test = create_sequences(test_data_norm, SEQ_LENGTH, stride=1)
 
     # 转为 PyTorch Tensor
     train_tensor = torch.FloatTensor(X_train)
@@ -200,11 +220,11 @@ if raw_data is not None:
     # --- 可视化结果 (match mra.py style exactly) ---
     scores = test_loss_dist
     plt.figure(figsize=(6, 5))
-    plt.plot(scores, label='Anomaly Score', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
-    plt.xlabel('Sample Index')
-    plt.ylabel('Reconstruction Error')
-    plt.title('LSTM Anomaly Detection')
+    plt.plot(scores, label='异常分数', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
+    plt.xlabel('样本索引')
+    plt.ylabel('重构误差')
+    plt.title('LSTM异常检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
 

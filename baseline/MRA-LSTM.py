@@ -15,46 +15,76 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
+plt.rcParams['font.sans-serif'] = ['SimHei']
 
 class TEPDataset(Dataset):
-    """Dataset for Tennessee Eastman Process data"""
-    def __init__(self, data, sequence_length=30, prediction_horizon=1, training=True):
-        self.data = data
+    """Dataset for Tennessee Eastman Process data.
+
+    Uses front-padding sliding window (following mra.py methodology):
+    - For each data point i, the input window covers [i - seq_len + 1, i].
+    - When i < seq_len, the window is front-padded by repeating the first sample.
+    - This produces exactly one window per data point (stride=1), so every
+      sample gets a corresponding anomaly score.
+    """
+    def __init__(self, data, feature_cols, sequence_length=30,
+                 prediction_horizon=1, stride=1, training=True):
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.training = training
+        self.feature_cols = feature_cols
 
-        # Create sliding window sequences
-        self.sequences = []
+        values = data[feature_cols].values.astype(np.float32)
+        n = len(values)
+
+        # Build windows with front-padding (mra.py style)
+        self.x_windows = []
+        self.y_windows = []
         self.labels = []
 
-        if training:
-            # For training: create sequences from normal data
-            for i in range(len(data) - sequence_length - prediction_horizon + 1):
-                x = data[i:i + sequence_length]
-                y = data[i + sequence_length:i + sequence_length + prediction_horizon]
-                self.sequences.append((x, y))
-                self.labels.append(0)  # Normal = 0
-        else:
-            # For testing: create sequences from all data
-            for i in range(len(data) - sequence_length - prediction_horizon + 1):
-                x = data[i:i + sequence_length]
-                y = data[i + sequence_length:i + sequence_length + prediction_horizon]
-                # Use faultNumber as label (0 = normal, >0 = fault)
-                fault_num = int(data['faultNumber'].iloc[i + sequence_length]) if 'faultNumber' in data.columns else 0
-                self.sequences.append((x, y))
-                self.labels.append(fault_num)
+        for i in range(0, n, stride):
+            # --- input window (length = sequence_length) ---
+            if i < sequence_length:
+                pad_len = sequence_length - i - 1
+                window = np.concatenate([
+                    np.tile(values[0:1], (pad_len, 1)),   # repeat first sample
+                    values[0:i + 1]
+                ], axis=0)
+            else:
+                window = values[i - sequence_length + 1:i + 1]
+
+            # --- target window (length = prediction_horizon) ---
+            y_start = i + 1
+            y_end = y_start + prediction_horizon
+            if y_end <= n:
+                target = values[y_start:y_end]
+            else:
+                # Pad with the last sample when at the boundary
+                available = values[y_start:n] if y_start < n else values[-1:]
+                pad_needed = prediction_horizon - len(available)
+                target = np.concatenate([
+                    available,
+                    np.tile(values[-1:], (pad_needed, 1))
+                ], axis=0)
+
+            self.x_windows.append(window)
+            self.y_windows.append(target)
+
+            # Label
+            if training:
+                self.labels.append(0)
+            else:
+                if 'faultNumber' in data.columns:
+                    self.labels.append(int(data['faultNumber'].iloc[i]))
+                else:
+                    self.labels.append(0)
 
     def __len__(self):
-        return len(self.sequences)
+        return len(self.x_windows)
 
     def __getitem__(self, idx):
-        x, y = self.sequences[idx]
+        x_tensor = torch.FloatTensor(self.x_windows[idx])
+        y_tensor = torch.FloatTensor(self.y_windows[idx])
         label = self.labels[idx]
-        # Drop non-feature columns for model input
-        feature_cols = [c for c in x.columns if c not in ['faultNumber', 'simulationRun', 'sample']]
-        x_tensor = torch.FloatTensor(x[feature_cols].values)
-        y_tensor = torch.FloatTensor(y[feature_cols].values)
         return x_tensor, y_tensor, label
 
 
@@ -545,11 +575,11 @@ def evaluate_detection(errors, labels, threshold):
 def plot_anomaly_detection(errors, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
     plt.figure(figsize=(6, 5))
-    plt.plot(errors, label='Anomaly Score', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
-    plt.xlabel('Sample Index')
-    plt.ylabel('Reconstruction Error')
-    plt.title('MRA-LSTM Anomaly Detection')
+    plt.plot(errors, label='异常分数', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
+    plt.xlabel('样本索引')
+    plt.ylabel('重构误差')
+    plt.title('MRA-LSTM异常检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -598,8 +628,8 @@ def main():
     print(f"Number of features: {len(feature_cols)}")
 
     # Create datasets and dataloaders
-    train_dataset = TEPDataset(train_df, sequence_length, prediction_horizon, training=True)
-    test_dataset = TEPDataset(test_df, sequence_length, prediction_horizon, training=False)
+    train_dataset = TEPDataset(train_df, feature_cols, sequence_length, prediction_horizon, training=True)
+    test_dataset = TEPDataset(test_df, feature_cols, sequence_length, prediction_horizon, training=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)

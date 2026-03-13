@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
@@ -12,6 +13,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import roc_curve, auc
 import seaborn as sns
+
+plt.rcParams['font.sans-serif'] = ['SimHei']
 
 def plot_results(
     y_true,
@@ -25,11 +28,11 @@ def plot_results(
     anomaly_scores = np.asarray(anomaly_scores).flatten()
 
     plt.figure(figsize=(6, 5))
-    plt.plot(anomaly_scores, label='Anomaly Score', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
-    plt.xlabel('Sample Index')
-    plt.ylabel('Reconstruction Error')
-    plt.title('CNN Anomaly Detection')
+    plt.plot(anomaly_scores, label='异常分数', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
+    plt.xlabel('样本索引')
+    plt.ylabel('重构误差')
+    plt.title('CNN异常检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -61,7 +64,28 @@ def generate_mask_matrix():
         mock_mask = np.isnan(mock_data).astype(int)
         return mock_data, mock_mask
 
-def prepare_data():
+def create_windows(data, seq_len=60, stride=1):
+    """参考 mra.py 的滑窗方式，返回形状 (num_windows, seq_len, num_features)"""
+    n = len(data)
+    if n == 0:
+        return np.zeros((0, seq_len, data.shape[1]))
+
+    windows = []
+    for i in range(0, n, stride):
+        if i < seq_len:
+            # 头部不足 seq_len 时，用首样本做前向填充
+            pad_len = seq_len - i - 1
+            window_data = np.concatenate(
+                [np.tile(data[0:1], (pad_len, 1)), data[0 : i + 1]],
+                axis=0,
+            )
+        else:
+            window_data = data[i - seq_len + 1 : i + 1]
+        windows.append(window_data)
+
+    return np.stack(windows)
+
+def prepare_data(seq_len=60, stride=1):
     # 1. 加载数据
     data, mask = generate_mask_matrix()
     
@@ -84,23 +108,27 @@ def prepare_data():
     # 4. 数据分割 (训练集/测试集)
     # 前 50% 用于训练，后 50% 用于测试（保持时间顺序，不打乱）
     split_idx = len(data) // 2
-    X_train, X_test = data[:split_idx], data[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
 
     # 5. 标准化 (Standardization)
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test) # 使用训练集的参数转换测试集
+    scaler.fit(data[:split_idx])
+    data_scaled = scaler.transform(data)  # 使用训练集的参数转换全量数据
 
-    # 6. 重塑数据以适应 1D-CNN
+    # 6. 生成滑窗 (参考 mra.py)
+    X_train = create_windows(data_scaled[:split_idx], seq_len=seq_len, stride=stride)
+    X_test = create_windows(data_scaled[split_idx:], seq_len=seq_len, stride=stride)
+    y_train = y[:split_idx:stride]
+    y_test = y[split_idx::stride]
+
+    # 7. 重塑数据以适应 1D-CNN
     # PyTorch Conv1d 输入形状: (Batch_Size, Channels, Length)
-    # 我们将 41 个特征视为长度为 41 的序列，通道数为 1
-    X_train = X_train.reshape(-1, 1, 41)
-    X_test = X_test.reshape(-1, 1, 41)
+    # 将 41 个变量作为通道数，滑窗长度 seq_len 作为序列长度
+    X_train = np.transpose(X_train, (0, 2, 1))  # (N, 41, seq_len)
+    X_test = np.transpose(X_test, (0, 2, 1))
 
-    # 7. 转为 PyTorch Tensor
+    # 8. 转为 PyTorch Tensor
     X_train_tensor = torch.FloatTensor(X_train)
-    y_train_tensor = torch.FloatTensor(y_train).unsqueeze(1) # shape变为 (N, 1)
+    y_train_tensor = torch.FloatTensor(y_train).unsqueeze(1)  # shape变为 (N, 1)
     X_test_tensor = torch.FloatTensor(X_test)
     y_test_tensor = torch.FloatTensor(y_test).unsqueeze(1)
 
@@ -111,36 +139,42 @@ def prepare_data():
 # ---------------------------------------------------------
 
 class AnomalyDetectorCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, num_features=41):
         super(AnomalyDetectorCNN, self).__init__()
 
         # 1D-CNN Autoencoder: train on normal, detect anomalies by reconstruction error
         self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
+            nn.Conv1d(in_channels=num_features, out_channels=16, kernel_size=3, padding=1),
             nn.BatchNorm1d(16),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),  # 41 -> 20
+            nn.MaxPool1d(kernel_size=2),  # seq_len -> seq_len/2
             nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2),  # 20 -> 10
+            nn.MaxPool1d(kernel_size=2),  # seq_len/2 -> seq_len/4
         )
 
         self.decoder = nn.Sequential(
-            nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=2, stride=2),  # 10 -> 20
+            nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=2, stride=2),  # seq_len/4 -> seq_len/2
             nn.ReLU(),
             nn.ConvTranspose1d(
                 in_channels=16,
-                out_channels=1,
+                out_channels=num_features,
                 kernel_size=2,
                 stride=2,
-                output_padding=1,  # 20 -> 41
+                output_padding=0,  # seq_len/2 -> seq_len
             ),
         )
 
     def forward(self, x):
         z = self.encoder(x)
         x_rec = self.decoder(z)
+        # 若长度不一致，进行裁剪或右侧补零
+        if x_rec.size(-1) != x.size(-1):
+            if x_rec.size(-1) > x.size(-1):
+                x_rec = x_rec[..., : x.size(-1)]
+            else:
+                x_rec = F.pad(x_rec, (0, x.size(-1) - x_rec.size(-1)))
         return x_rec
 
 # ---------------------------------------------------------
@@ -149,7 +183,9 @@ class AnomalyDetectorCNN(nn.Module):
 
 def train_model():
     # 准备数据
-    X_train, y_train, X_test, y_test = prepare_data()
+    SEQ_LEN = 60
+    STRIDE = 1
+    X_train, y_train, X_test, y_test = prepare_data(seq_len=SEQ_LEN, stride=STRIDE)
     
     # 创建 DataLoader
     train_dataset = TensorDataset(X_train, X_train)
@@ -157,7 +193,7 @@ def train_model():
 
     # 初始化模型、损失函数、优化器
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AnomalyDetectorCNN().to(device)
+    model = AnomalyDetectorCNN(num_features=41).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
