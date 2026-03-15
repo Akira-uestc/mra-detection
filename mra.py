@@ -476,17 +476,20 @@ def train():
             obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
             test_scores.extend((sq_err / obs_cnt).cpu().numpy())
 
-    scores = np.array(test_scores)
+    test_scores_arr = np.array(test_scores)
+
+    # Splice train scores to front of test scores for evaluation
+    scores = np.concatenate([train_scores, test_scores_arr])
     
-    print(f"\nAnomaly Detection Results (Test Set):")
+    print(f"\nAnomaly Detection Results:")
     print(f"  Mean Score: {np.mean(scores):.6f}")
     print(f"  Std Score:  {np.std(scores):.6f}")
     print(f"  Threshold (from train): {threshold:.6f}")
     print(f"  Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
 
     # Classification Metrics
-    # Ground truth: all test samples are anomalous (label=1)
-    y_true = np.ones(len(scores), dtype=int)
+    # Labels: 0 for train (normal), 1 for test (anomaly)
+    y_true = np.concatenate([np.zeros(len(train_scores), dtype=int), np.ones(len(test_scores_arr), dtype=int)])
     y_pred = (scores > threshold).astype(int)
 
     acc = accuracy_score(y_true, y_pred)

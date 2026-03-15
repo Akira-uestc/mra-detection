@@ -7,28 +7,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix
-
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from sklearn.metrics import roc_curve, auc
-import seaborn as sns
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-def plot_results(
-    y_true,
-    anomaly_scores,
-    y_pred,
-    threshold,
-    train_scores=None,
-    output_pdf="anomaly_detection_results.pdf",
-):
+def plot_results(scores, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """绘制异常检测可视化图（与 mra.py 完全一致）"""
-    anomaly_scores = np.asarray(anomaly_scores).flatten()
-
     plt.figure(figsize=(6, 5))
-    plt.plot(anomaly_scores, label='异常分数', alpha=0.7)
+    plt.plot(scores, label='异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
     plt.xlabel('样本索引')
     plt.ylabel('重构误差')
@@ -37,8 +24,8 @@ def plot_results(
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
-    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
+    plt.savefig(save_path, dpi=150)
+    print(f"\nPlot saved to: {save_path}")
     plt.show()
 
 """
@@ -229,39 +216,34 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        thr_mean3std = train_mean + 3.0 * train_std
-        threshold = float(np.quantile(train_scores, 0.99))
+        threshold = train_mean + 3.0 * train_std
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
 
-        y_true = y_test.detach().cpu().numpy().flatten().astype(int)
-        y_pred = (test_scores > threshold).astype(int)
+        # Splice train scores to front of test scores for evaluation
+        all_scores = np.concatenate([train_scores, test_scores])
+        # Labels: 0 for train (normal), 1 for test (anomaly)
+        y_true = np.concatenate([np.zeros(len(train_scores), dtype=int), np.ones(len(test_scores), dtype=int)])
+        y_pred = (all_scores > threshold).astype(int)
 
         print(f"Device: {device}")
         print(f"Train recon error: mean={train_mean:.6f}, std={train_std:.6f}")
-        print(f"Threshold: p99={threshold:.6f} (mean+3std={thr_mean3std:.6f})")
-        print(f"Anomalies detected in test: {(y_pred == 1).sum()} / {len(y_pred)}")
+        print(f"Threshold (mean + 3*std): {threshold:.6f}")
+        print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-        print("\n分类报告:")
-        print(
-            classification_report(
-                y_true,
-                y_pred,
-                labels=[0, 1],
-                target_names=["Normal", "Anomaly"],
-                zero_division=0,
-            )
-        )
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
 
-        plot_results(
-            y_true,
-            test_scores,
-            y_pred,
-            threshold,
-            train_scores=train_scores,
-            output_pdf="anomaly_detection_results.pdf",
-        )
+        print(f"\nClassification Metrics:")
+        print(f"  Accuracy:  {acc:.4f}")
+        print(f"  Precision: {prec:.4f}")
+        print(f"  Recall:    {rec:.4f}")
+        print(f"  F1-Score:  {f1:.4f}")
+
+        plot_results(all_scores, threshold)
         
 if __name__ == "__main__":
     train_model()

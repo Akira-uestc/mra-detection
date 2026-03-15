@@ -197,14 +197,13 @@ if raw_data is not None:
     
     print(f"\n计算出的异常阈值: {threshold:.6f}")
     
-    # --- 判定 ---
-    anomalies = test_loss_dist > threshold
-    print(f"检测到的异常数量: {np.sum(anomalies)}")
+    # Splice train scores to front of test scores for evaluation
+    scores = np.concatenate([train_loss_dist, test_loss_dist])
+    # Labels: 0 for train (normal), 1 for test (anomaly)
+    y_true = np.concatenate([np.zeros(len(train_loss_dist), dtype=int), np.ones(len(test_loss_dist), dtype=int)])
+    y_pred = (scores > threshold).astype(int)
 
-    # Classification Metrics
-    # Ground truth: all test sequences are anomalous (label=1)
-    y_true = np.ones(len(test_loss_dist), dtype=int)
-    y_pred = anomalies.astype(int)
+    print(f"检测到的异常数量: {(y_pred == 1).sum()} / {len(y_pred)}")
 
     acc = accuracy_score(y_true, y_pred)
     prec = precision_score(y_true, y_pred, zero_division=0)
@@ -218,7 +217,6 @@ if raw_data is not None:
     print(f"  F1-Score:  {f1:.4f}")
     
     # --- 可视化结果 (match mra.py style exactly) ---
-    scores = test_loss_dist
     plt.figure(figsize=(6, 5))
     plt.plot(scores, label='异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')

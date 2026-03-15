@@ -682,11 +682,17 @@ def main():
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
     print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
 
+    # Splice train errors to front of test errors for evaluation
+    all_errors = np.concatenate([train_errors, test_errors])
+
     # Apply EWAF to smooth errors
-    smoothed_test_errors = apply_ewaf(test_errors, alpha=0.3)
+    smoothed_all_errors = apply_ewaf(all_errors, alpha=0.3)
+
+    # Labels: 0 for train (normal), 1 for test (anomaly)
+    all_labels = np.concatenate([np.zeros(len(train_errors), dtype=int), np.ones(len(test_errors), dtype=int)])
 
     # Evaluate detection using training-based threshold
-    metrics = evaluate_detection(smoothed_test_errors, labels, threshold_train)
+    metrics = evaluate_detection(smoothed_all_errors, all_labels, threshold_train)
     print("\nDetection Performance (using training-based threshold):")
     print(f"  Accuracy:  {metrics['accuracy']:.4f}")
     print(f"  Precision: {metrics['precision']:.4f}")
@@ -697,7 +703,7 @@ def main():
 
     # Plot anomaly detection results
     print("\nPlotting anomaly detection results...")
-    plot_anomaly_detection(smoothed_test_errors, threshold_train)
+    plot_anomaly_detection(smoothed_all_errors, threshold_train)
 
     # Save model
     torch.save(model.state_dict(), 'mra_lstm_model.pth')
