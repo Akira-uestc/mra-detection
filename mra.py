@@ -329,7 +329,6 @@ class AGF_ADNet(nn.Module):
 
         # 4. Imputation: Fill missing with imputed values
         observed_mask = 1.0 - mask
-        observed_mask = mask
         x_filled = x * observed_mask + x_imp * mask
 
         # 5. Transformer Reconstruction

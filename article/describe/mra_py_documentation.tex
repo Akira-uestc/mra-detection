@@ -215,7 +215,7 @@ Dropout & $0.1$ & Transformer 编码层内置 dropout \\
     \bm{X}^{\text{imp}} &= \operatorname{GatedFusion}(\bm{H}^{\text{time}}, \bm{H}^{\text{freq}}) \\
     \hat{\bm{X}} &= \operatorname{TransformerHead}(\bm{X}^{\text{filled}})
 \end{align}
-其中 $\bm{X}^{\text{filled}}$ 的\textbf{理想形式}应当是“观测位置保留原值，缺失位置使用插补值”，但当前代码的真实行为与理想公式存在差异，后文会专门说明。
+其中 $\bm{X}^{\text{filled}}$ 由“观测位置保留输入值、缺失位置使用插补值”的标准插补公式构造，后文会给出其精确表达式。
 
 \subsection{图结构学习模块：GraphLearner}
 
@@ -458,7 +458,7 @@ GraphLearner 使用两组可学习节点嵌入：
 
 \subsubsection{输入投影}
 
-理论上，融合后的插补序列应形成 $\bm{X}^{\text{filled}}$，再送入 Transformer。代码中的投影为：
+融合后的插补序列 $\bm{X}^{\text{filled}}$ 送入 Transformer。代码中的投影为：
 \begin{equation}
     \bm{Z}_0 = \bm{X}^{\text{filled}}\bm{W}_{\text{in}} + \bm{b}_{\text{in}} + \bm{P},
 \end{equation}
@@ -508,54 +508,44 @@ GraphLearner 使用两组可学习节点嵌入：
     \qquad \bm{W}_{\text{out}} \in \mathbb{R}^{d \times N}.
 \end{equation}
 
-\section{关于 \texorpdfstring{$\bm{X}^{\text{filled}}$}{Xfilled} 的实现细节}
+\section{关于 \texorpdfstring{$\bm{X}^{\text{filled}}$}{Xfilled} 的实现}
 
 \subsection{代码中的真实写法}
 
 在 \texttt{AGF\_ADNet.forward()} 中，与插补有关的代码逻辑是：
 \begin{align}
     \bm{O} &= 1 - \bm{M}, \\
-    \bm{O} &= \bm{M}, \\
     \bm{X}^{\text{filled}} &= \bm{X}^{\text{in}} \odot \bm{O} + \bm{X}^{\text{imp}} \odot \bm{M}.
 \end{align}
 
-由于第二行直接覆盖了第一行，因此代码真实执行的是：
-\begin{equation}
-    \bm{X}^{\text{filled}} = \bm{X}^{\text{in}} \odot \bm{M} + \bm{X}^{\text{imp}} \odot \bm{M}.
-\end{equation}
+\subsection{与原始窗口的等价表达}
 
-\subsection{进一步化简}
-
-又因为进入模型前已经做过
+由于进入模型前已经做过
 \begin{equation}
     \bm{X}^{\text{in}} = \bm{X} \odot (1-\bm{M}),
 \end{equation}
-所以有
+所以 $\bm{X}^{\text{filled}}$ 也可以等价写成
 \begin{equation}
-    \bm{X}^{\text{in}} \odot \bm{M} = \bm{0}.
-\end{equation}
-因此当前代码下 Transformer 实际接收的是：
-\begin{equation}
-    \bm{X}^{\text{filled}} = \bm{X}^{\text{imp}} \odot \bm{M}.
+    \bm{X}^{\text{filled}}
+    =
+    \bm{X} \odot (1-\bm{M})
+    +
+    \bm{X}^{\text{imp}} \odot \bm{M}.
 \end{equation}
 
 \paragraph{含义}
 这表示：
 \begin{itemize}
-    \item 被标记为 missing 的位置进入 Transformer 时保留插补值；
-    \item 被标记为 observed 的位置进入 Transformer 时为 0。
+    \item 被标记为 observed 的位置，Transformer 看到原始输入值；
+    \item 被标记为 missing 的位置，Transformer 看到门控融合得到的插补值。
 \end{itemize}
 
-\paragraph{与常见插补逻辑的差异}
-更常见、也更直觉的写法通常是：
+\paragraph{实现意义}
+这是一个标准的插补式重构接口：
 \begin{equation}
-    \bm{X}^{\text{filled,ideal}}
-    =
-    \bm{X}^{\text{in}} \odot (1-\bm{M})
-    +
-    \bm{X}^{\text{imp}} \odot \bm{M},
+    \text{观测位置保真} + \text{缺失位置补全}.
 \end{equation}
-即“观测位置保留原值，缺失位置填补预测值”。但本文档在其余部分仍以\textbf{代码真实行为}为准。
+因此 Transformer 的输入同时保留了原始观测信息和模型生成的插补信息。
 
 \section{损失函数：dual\_domain\_loss}
 
@@ -854,7 +844,7 @@ CSV 读取 & 读取 \texttt{./data/train/train\_*.csv} 与 \texttt{./data/test/t
     \item \textbf{图正则不是 $L_1$，而是熵。} 这与很多图学习论文中的“稀疏正则”写法不同。
     \item \textbf{阈值是 $1\sigma$ 规则。} 代码实现为训练分数均值加一个标准差，而非三倍标准差。
     \item \textbf{测试标签生成依赖顺序假设。} 后半段强制视为异常，是一种数据集特定约定，不是通用异常标注方式。
-    \item \textbf{当前 Transformer 输入只保留掩码位置的插补值。} 这是由 \texttt{observed\_mask} 覆盖造成的真实行为。
+    \item \textbf{当前 Transformer 输入采用标准插补形式。} 观测位置保留输入值，缺失位置使用 $\bm{X}^{\text{imp}}$ 补全。
     \item \textbf{最佳模型按训练损失选取。} 没有单独验证集，也没有早停机制。
 \end{enumerate}
 
@@ -876,6 +866,6 @@ CSV 读取 & 读取 \texttt{./data/train/train\_*.csv} 与 \texttt{./data/test/t
     先把多变量时间序列在\textbf{图结构、时域局部模式、频域全局模式}三个视角下进行表征，再通过融合与 Transformer 重构建立“正常行为模型”，最后用\textbf{掩码加权的重构误差}判断异常。
 \end{quote}
 
-但在实际部署或复现实验时，仍应特别注意本文档指出的实现细节，尤其是掩码语义、阈值公式以及 \texttt{X\_filled} 的当前代码行为。
+但在实际部署或复现实验时，仍应特别注意本文档指出的实现细节，尤其是掩码语义、阈值公式以及 \texttt{X\_filled} 的构造方式。
 
 \end{document}
