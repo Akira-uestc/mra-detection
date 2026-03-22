@@ -182,9 +182,9 @@ class GraphLearner(nn.Module):
         # 调用父类初始化，注册参数与模块。
         super().__init__()
         # 第一个节点嵌入矩阵，形状为 `(节点数, 嵌入维度)`。
-        self.E1 = nn.Parameter(torch.randn(num_nodes, embed_dim))
+        self.E1 = nn.Parameter(torch.ones(num_nodes, embed_dim))
         # 第二个节点嵌入矩阵，用于与 `E1` 做双线性关联。
-        self.E2 = nn.Parameter(torch.randn(num_nodes, embed_dim))
+        self.E2 = nn.Parameter(torch.ones(num_nodes, embed_dim))
         # `alpha` 控制 `tanh` 前的缩放强度。
         self.alpha = alpha
 
@@ -334,11 +334,6 @@ class FrequencyImputer(nn.Module):
 
         # 对时间维做实数快速傅里叶变换，输出是复数张量。
         xf = torch.fft.rfft(x_perm, dim=2)
-
-        # 取频谱幅值，常用于衡量不同频率分量强弱。
-        magnitude = torch.abs(xf)
-        # 取相位信息，描述频率分量的相位偏移。
-        phase = torch.angle(xf)
 
         # 把复数频谱拆成实部和虚部。
         real, imag = xf.real, xf.imag
@@ -742,7 +737,7 @@ def train():
     # 打印训练开始提示。
     print("Starting training...")
     # 这里只训练 3 个 epoch。
-    for epoch in range(3):
+    for epoch in range(10):
         # 切换到训练模式。
         model.train()
         # 累计本轮所有 batch 的损失。
