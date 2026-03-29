@@ -57,7 +57,7 @@ def create_windows(data, mask, seq_len, stride=1):
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-    for i in range(0, n, stride):
+    for i in range(99, n, stride):
         if i < seq_len:
             pad_len = seq_len - i - 1
             window_data = np.concatenate([
@@ -212,7 +212,7 @@ def run_full_detection():
     feature_dim = num_features
     window_size = 60
     s_rate = 6
-    train_epochs = 50
+    train_epochs = 10
     batch_size = 32
     mask_ratio = 0.15
 
