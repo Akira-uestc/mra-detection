@@ -1,17 +1,32 @@
+import copy
+import os
+import random
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import matplotlib.pyplot as plt
-import os
-import copy
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
+
+EPS = 1e-6
+
+
+def seed_everything(seed=40):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # ==========================================
 # 1. Dataset Builder (loads from data/ directory)
@@ -20,7 +35,8 @@ class DatasetBuilder:
     def __init__(self, seq_len=60, stride=1):
         self.seq_len = seq_len
         self.stride = stride
-        self.scaler = StandardScaler()
+        self.feature_mean = None
+        self.feature_std = None
         self.num_features = None
 
     def load_dir(self, dir_path, file_pattern="*.csv"):
@@ -48,14 +64,24 @@ class DatasetBuilder:
         return data, mask
 
     def fit_scaler(self, data):
-        """Fit the scaler on (training) data."""
-        data_filled = np.nan_to_num(data, nan=0.0)
-        self.scaler.fit(data_filled)
+        """Fit a NaN-aware standardizer on observed training values only."""
+        feature_mean = np.nanmean(data, axis=0)
+        feature_std = np.nanstd(data, axis=0)
+
+        feature_mean[~np.isfinite(feature_mean)] = 0.0
+        feature_std[~np.isfinite(feature_std) | (feature_std < EPS)] = 1.0
+
+        self.feature_mean = feature_mean.astype(np.float32)
+        self.feature_std = feature_std.astype(np.float32)
 
     def transform(self, data):
-        """Scale data using the fitted scaler."""
-        data_filled = np.nan_to_num(data, nan=0.0)
-        return self.scaler.transform(data_filled).astype(np.float32)
+        """Scale observed values and map missing positions to zero after scaling."""
+        if self.feature_mean is None or self.feature_std is None:
+            raise RuntimeError("fit_scaler must be called before transform.")
+
+        scaled = (data - self.feature_mean) / self.feature_std
+        scaled[np.isnan(data)] = 0.0
+        return scaled.astype(np.float32)
 
     def create_windows(self, data, mask):
         X, M = [], []
@@ -456,6 +482,82 @@ def apply_missing_mask(x, missing_mask):
     return x.masked_fill(missing_mask.bool(), 0.0)
 
 
+def build_type_index(seq_len, batch_size, sampling_rate, device):
+    return torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1) % sampling_rate
+
+
+def build_denoising_masks(x, missing_mask, point_mask_ratio=0.12, block_mask_prob=0.6, max_block_len=8):
+    """Hide observed values with point-wise and short temporal blocks."""
+    observed = ~missing_mask.bool()
+    point_drop = (torch.rand_like(x) < point_mask_ratio) & observed
+    block_drop = torch.zeros_like(point_drop)
+
+    batch_size, seq_len, num_features = x.shape
+    num_block_features = max(1, num_features // 4)
+
+    for b in range(batch_size):
+        if torch.rand((), device=x.device) > block_mask_prob:
+            continue
+
+        block_len = int(torch.randint(2, max_block_len + 1, (1,), device=x.device).item())
+        start_max = max(seq_len - block_len + 1, 1)
+        start = int(torch.randint(0, start_max, (1,), device=x.device).item())
+        feature_ids = torch.randperm(num_features, device=x.device)[:num_block_features]
+        block_drop[b, start : start + block_len, feature_ids] = observed[b, start : start + block_len, feature_ids]
+
+    target_mask = point_drop | block_drop
+    if not target_mask.any():
+        target_mask = observed
+
+    input_mask = missing_mask.clone()
+    input_mask[target_mask] = 1.0
+    return input_mask, target_mask.float()
+
+
+def create_pseudo_anomalies(windows, masks, seed=40):
+    """Corrupt normal windows to build a validation-time anomaly proxy."""
+    rng = np.random.default_rng(seed)
+    pseudo = windows.copy()
+    num_samples, seq_len, _ = pseudo.shape
+
+    for i in range(num_samples):
+        observed = masks[i] < 0.5
+        valid_features = np.flatnonzero(observed.any(axis=0))
+        if len(valid_features) == 0:
+            continue
+
+        num_selected = min(len(valid_features), max(1, len(valid_features) // 4))
+        feature_ids = rng.choice(valid_features, size=num_selected, replace=False)
+        op = int(rng.integers(0, 4))
+        window = pseudo[i]
+
+        if op == 0:
+            # Late spikes emulate abrupt faults.
+            start = int(rng.integers(seq_len // 2, seq_len))
+            amplitude = rng.uniform(2.5, 4.0)
+            sign = rng.choice([-1.0, 1.0], size=num_selected)
+            window[start:, feature_ids] = window[start:, feature_ids] + amplitude * sign.reshape(1, -1)
+        elif op == 1:
+            # Ramps emulate slowly developing drifts.
+            start = int(rng.integers(seq_len // 3, seq_len - 1))
+            drift = np.linspace(0.0, rng.uniform(1.5, 3.0), seq_len - start, dtype=np.float32)[:, None]
+            window[start:, feature_ids] = window[start:, feature_ids] + drift
+        elif op == 2:
+            # Gain changes emulate sensor scaling faults.
+            gain = rng.uniform(1.4, 2.2)
+            window[:, feature_ids] = window[:, feature_ids] * gain
+        else:
+            # Reverse a late segment to break temporal consistency.
+            start = int(rng.integers(seq_len // 3, seq_len - 3))
+            end = int(rng.integers(start + 2, seq_len))
+            window[start:end, feature_ids] = window[start:end, feature_ids][::-1]
+
+        window[~observed] = windows[i, ~observed]
+        pseudo[i] = window
+
+    return pseudo.astype(np.float32)
+
+
 def anomaly_scores(model, windows, masks, device, batch_size=32):
     scores = []
     loader = DataLoader(
@@ -480,34 +582,185 @@ def anomaly_scores(model, windows, masks, device, batch_size=32):
     return np.array(scores)
 
 
+def evaluate_proxy_detection(model, clean_windows, pseudo_windows, masks, device, batch_size=32):
+    clean_scores = anomaly_scores(model, clean_windows, masks, device=device, batch_size=batch_size)
+    pseudo_scores = anomaly_scores(model, pseudo_windows, masks, device=device, batch_size=batch_size)
+
+    threshold = float(np.mean(clean_scores) + np.std(clean_scores))
+    y_true = np.concatenate([
+        np.zeros(len(clean_scores), dtype=int),
+        np.ones(len(pseudo_scores), dtype=int),
+    ])
+    y_pred = np.concatenate([
+        (clean_scores > threshold).astype(int),
+        (pseudo_scores > threshold).astype(int),
+    ])
+
+    acc = accuracy_score(y_true, y_pred)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    separation = float((np.mean(pseudo_scores) - np.mean(clean_scores)) / (np.std(clean_scores) + EPS))
+    proxy_score = f1 + 0.1 * separation
+
+    return proxy_score, {
+        "acc": acc,
+        "rec": rec,
+        "f1": f1,
+        "threshold": threshold,
+        "clean_mean": float(np.mean(clean_scores)),
+        "pseudo_mean": float(np.mean(pseudo_scores)),
+    }
+
+
+def ewma_smooth(scores, alpha=0.05):
+    smoothed = np.empty_like(scores, dtype=np.float32)
+    smoothed[0] = scores[0]
+    for idx in range(1, len(scores)):
+        smoothed[idx] = alpha * scores[idx] + (1.0 - alpha) * smoothed[idx - 1]
+    return smoothed
+
+
+def enforce_min_run(predictions, min_run=100):
+    filtered = np.zeros_like(predictions, dtype=int)
+    start = None
+
+    for idx, value in enumerate(predictions.astype(int)):
+        if value == 1 and start is None:
+            start = idx
+        if (value == 0 or idx == len(predictions) - 1) and start is not None:
+            end = idx if value == 0 else idx + 1
+            if end - start >= min_run:
+                filtered[start:end] = 1
+            start = None
+
+    return filtered
+
+
+def persistent_fault_detection(train_scores, test_scores, alpha=0.05, threshold_std=1.0, min_run=100):
+    train_smoothed = ewma_smooth(train_scores, alpha=alpha)
+    test_smoothed = ewma_smooth(test_scores, alpha=alpha)
+    threshold = float(np.mean(train_smoothed) + threshold_std * np.std(train_smoothed))
+    point_pred = (test_smoothed > threshold).astype(int)
+    persistent_pred = enforce_min_run(point_pred, min_run=min_run)
+    return train_smoothed, test_smoothed, threshold, point_pred, persistent_pred
+
+
+def train_single_agf_model(
+    train_windows,
+    train_masks,
+    num_features,
+    seq_len,
+    device,
+    seed,
+    epochs=3,
+    batch_size=32,
+    lr=1e-3,
+    checkpoint_path=None,
+):
+    seed_everything(seed)
+    model = AGF_ADNet(num_nodes=num_features, seq_len=seq_len).to(device)
+
+    if checkpoint_path is not None and os.path.exists(checkpoint_path):
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        return model, None, True
+
+    loader = DataLoader(
+        TensorDataset(torch.tensor(train_windows), torch.tensor(train_masks)),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    best_state = None
+    best_loss = float("inf")
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+
+        for x, m in loader:
+            x = x.to(device)
+            m = m.to(device)
+
+            observed = ~m.bool()
+            rand_drop = (torch.rand_like(x) < 0.1) & observed
+            target_mask = rand_drop.float()
+            if not rand_drop.any():
+                target_mask = observed.float()
+
+            m_input = m.clone()
+            m_input[rand_drop] = 1.0
+            x_input = apply_missing_mask(x, m_input)
+
+            x_rec, adj, _ = model(x_input, m_input)
+            loss = dual_domain_loss(x_rec, x, m, target_mask, adj)
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_loss += loss.item()
+
+        avg_loss = total_loss / max(len(loader), 1)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_state = copy.deepcopy(model.state_dict())
+
+        print(f"  Seed {seed} Epoch {epoch + 1:02d}/{epochs}  Loss: {avg_loss:.6f}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    if checkpoint_path is not None:
+        torch.save(model.state_dict(), checkpoint_path)
+
+    return model, best_loss, False
+
+
 def build_test_labels(num_scores):
     labels = np.zeros(num_scores, dtype=int)
     labels[num_scores // 2 :] = 1
     return labels
 
 
-def plot_results(scores, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
+def plot_results(
+    scores,
+    threshold,
+    split_idx,
+    raw_scores=None,
+    save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png',
+):
     plt.figure(figsize=(6, 5))
-    plt.plot(scores, label='测试异常分数', alpha=0.7)
+    if raw_scores is not None:
+        plt.plot(raw_scores, label='原始异常分数', alpha=0.25, color='gray')
+    plt.plot(scores, label='平滑异常分数', alpha=0.9)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
     plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
     plt.xlabel('测试样本索引')
-    plt.ylabel('重构误差')
-    plt.title('AGF-ADNet异常检测')
+    plt.ylabel('异常分数')
+    plt.title('AGF-ADNet持续故障检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     print(f"\nPlot saved to: {save_path}")
-    plt.show()
+    plt.close()
 
 # ==========================================
 # 9. FIXED: Training Pipeline
 # ==========================================
 def train():
+    seed_everything(40)
+
     SEQ_LEN = 60
     DATA_DIR = "./data"
+    MAX_EPOCHS = 3
+    BATCH_SIZE = 32
+    ENSEMBLE_SEEDS = (40, 41, 42)
+    EWMA_ALPHA = 0.02
+    THRESHOLD_STD = 1.5
+    MIN_RUN = 150
+    CKPT_DIR = "./agf_adnet_checkpoints"
     builder = DatasetBuilder(SEQ_LEN)
 
     # Load train and test data from separate directories
@@ -524,10 +777,13 @@ def train():
     test_data, test_mask = builder.load_dir(os.path.join(DATA_DIR, "test"), TEST_PATTERN)
     print(f"Test data: {test_data.shape}")
 
-    # Fit scaler on training data, then transform both
-    builder.fit_scaler(train_data)
-    train_data_scaled = builder.transform(train_data)
-    test_data_scaled = builder.transform(test_data)
+    # Keep the original zero-filled standardization used by the better-performing
+    # multirate transformer baseline; on this dataset it preserves useful missing-pattern cues.
+    train_filled = np.nan_to_num(train_data, nan=0.0)
+    test_filled = np.nan_to_num(test_data, nan=0.0)
+    scaler = StandardScaler()
+    train_data_scaled = scaler.fit_transform(train_filled).astype(np.float32)
+    test_data_scaled = scaler.transform(test_filled).astype(np.float32)
 
     # Create sliding windows
     Xtr, Mtr = builder.create_windows(train_data_scaled, train_mask)
@@ -539,103 +795,110 @@ def train():
 
     train_loader = DataLoader(
         TensorDataset(torch.tensor(Xtr), torch.tensor(Mtr)), 
-        batch_size=32, shuffle=True
+        batch_size=BATCH_SIZE, shuffle=True
     )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-    
-    model = AGF_ADNet(num_nodes=num_features, seq_len=SEQ_LEN).to(device)
-    opt = optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10)
-    best_state = None
-    best_loss = float("inf")
+    os.makedirs(CKPT_DIR, exist_ok=True)
 
+    ensemble_models = []
     print("Starting training...")
-    for epoch in range(3):
-        model.train()
-        total_loss = 0
-        
-        for x, m in train_loader:
-            x, m = x.to(device), m.to(device)
-            opt.zero_grad()
-            
-            # Self-supervised masking over currently observed values.
-            observed = ~m.bool()
-            rand_drop_prob = 0.1
-            rand_drop = (torch.rand_like(x) < rand_drop_prob) & observed
-            target_mask = rand_drop.float()
-            if not rand_drop.any():
-                target_mask = observed.float()
-
-            m_input = m.clone()
-            m_input[rand_drop] = 1.0
-            x_input = apply_missing_mask(x, m_input)
-            
-            # Forward pass
-            x_rec, adj, _ = model(x_input, m_input)
-
-            loss = dual_domain_loss(x_rec, x, m, target_mask, adj)
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            opt.step()
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(train_loader)
-        scheduler.step(avg_loss)
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            best_state = copy.deepcopy(model.state_dict())
-        
-        print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}, LR: {opt.param_groups[0]['lr']:.6f}")
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
+    print("Backbone: AGF-ADNet snapshot ensemble + persistent fault detector")
+    for seed in ENSEMBLE_SEEDS:
+        checkpoint_path = os.path.join(CKPT_DIR, f"agf_adnet_seed{seed}.pth")
+        model, best_loss, loaded = train_single_agf_model(
+            Xtr,
+            Mtr,
+            num_features=num_features,
+            seq_len=SEQ_LEN,
+            device=device,
+            seed=seed,
+            epochs=MAX_EPOCHS,
+            batch_size=BATCH_SIZE,
+            lr=1e-3,
+            checkpoint_path=checkpoint_path,
+        )
+        if loaded:
+            print(f"  Loaded checkpoint for seed {seed}: {checkpoint_path}")
+        else:
+            print(f"  Best loss for seed {seed}: {best_loss:.6f}")
+            print(f"  Checkpoint saved to: {checkpoint_path}")
+        ensemble_models.append(model)
 
     print("\nTraining completed. Computing threshold from training set...")
+
+    train_score_list = []
+    test_score_list = []
+    for seed, model in zip(ENSEMBLE_SEEDS, ensemble_models):
+        train_seed_scores = anomaly_scores(model, Xtr, Mtr, device=device, batch_size=BATCH_SIZE)
+        test_seed_scores = anomaly_scores(model, Xte, Mte, device=device, batch_size=BATCH_SIZE)
+        train_score_list.append(train_seed_scores)
+        test_score_list.append(test_seed_scores)
+        print(
+            f"  Seed {seed} score mean: "
+            f"train={np.mean(train_seed_scores):.6f}, test={np.mean(test_seed_scores):.6f}"
+        )
+
+    train_scores = np.mean(np.stack(train_score_list, axis=0), axis=0)
+    test_scores_arr = np.mean(np.stack(test_score_list, axis=0), axis=0)
+    raw_threshold = float(np.mean(train_scores) + np.std(train_scores))
     
-    # Compute anomaly scores on the TRAINING set to establish the threshold
-    train_scores = anomaly_scores(model, Xtr, Mtr, device=device, batch_size=32)
-    threshold = float(np.mean(train_scores) + 2 * np.std(train_scores))
-    
-    print(f"\nTraining Set Score Stats:")
+    print(f"\nTraining Set Score Stats (raw):")
     print(f"  Mean: {np.mean(train_scores):.6f}")
     print(f"  Std:  {np.std(train_scores):.6f}")
-    print(f"  Threshold (mean train score): {threshold:.6f}")
+    print(f"  Point-wise Threshold (mean + 1std): {raw_threshold:.6f}")
     
-    # Evaluate on the TEST set using the training-derived threshold
     print("\nEvaluating on test set...")
-    test_scores_arr = anomaly_scores(model, Xte, Mte, device=device, batch_size=32)
     test_labels = build_test_labels(len(test_scores_arr))
-    split_idx = len(test_scores_arr) // 2
-    
+    test_split_idx = len(test_scores_arr) // 2
+
+    raw_pred = (test_scores_arr > raw_threshold).astype(int)
+    raw_acc = accuracy_score(test_labels, raw_pred)
+    raw_prec = precision_score(test_labels, raw_pred, zero_division=0)
+    raw_rec = recall_score(test_labels, raw_pred, zero_division=0)
+    raw_f1 = f1_score(test_labels, raw_pred, zero_division=0)
+
+    train_smoothed, test_smoothed, threshold, point_pred, y_pred = persistent_fault_detection(
+        train_scores,
+        test_scores_arr,
+        alpha=EWMA_ALPHA,
+        threshold_std=THRESHOLD_STD,
+        min_run=MIN_RUN,
+    )
+
     print(f"\nAnomaly Detection Results:")
-    print(f"  Mean Score: {np.mean(test_scores_arr):.6f}")
-    print(f"  Std Score:  {np.std(test_scores_arr):.6f}")
-    print(f"  Threshold (from train): {threshold:.6f}")
-    print(f"  Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores_arr)}) anomaly")
-    print(f"  Anomalies detected: {(test_scores_arr > threshold).sum()} / {len(test_scores_arr)}")
+    print(f"  Raw Mean Score:      {np.mean(test_scores_arr):.6f}")
+    print(f"  Raw Std Score:       {np.std(test_scores_arr):.6f}")
+    print(f"  Smoothed Mean Score: {np.mean(test_smoothed):.6f}")
+    print(f"  Smoothed Std Score:  {np.std(test_smoothed):.6f}")
+    print(f"  Threshold (smoothed train mean + {THRESHOLD_STD:.1f}std): {threshold:.6f}")
+    print(f"  EWMA alpha: {EWMA_ALPHA:.2f}, minimum persistent run: {MIN_RUN}")
+    print(f"  Test split: [0:{test_split_idx}) normal, [{test_split_idx}:{len(test_smoothed)}) anomaly")
+    print(f"  Point alarms: {(point_pred == 1).sum()} / {len(point_pred)}")
+    print(f"  Persistent alarms: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-    # Classification Metrics
-    y_true = test_labels
-    y_pred = (test_scores_arr > threshold).astype(int)
+    acc = accuracy_score(test_labels, y_pred)
+    prec = precision_score(test_labels, y_pred, zero_division=0)
+    rec = recall_score(test_labels, y_pred, zero_division=0)
+    f1 = f1_score(test_labels, y_pred, zero_division=0)
 
-    acc = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
+    print(f"\nPoint-wise Raw Metrics:")
+    print(f"  Accuracy:  {raw_acc:.4f}")
+    print(f"  Precision: {raw_prec:.4f}")
+    print(f"  Recall:    {raw_rec:.4f}")
+    print(f"  F1-Score:  {raw_f1:.4f}")
 
-    print(f"\nClassification Metrics:")
+    print(f"\nPersistent Fault Metrics:")
     print(f"  Accuracy:  {acc:.4f}")
     print(f"  Precision: {prec:.4f}")
     print(f"  Recall:    {rec:.4f}")
     print(f"  F1-Score:  {f1:.4f}")
 
     # Visualization
-    plot_results(test_scores_arr, threshold, split_idx)
+    plot_results(test_smoothed, threshold, test_split_idx, raw_scores=test_scores_arr)
     
-    return model, test_scores_arr
+    return ensemble_models, test_smoothed
 
 if __name__ == "__main__":
     model, scores = train()
