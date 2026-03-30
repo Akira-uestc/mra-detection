@@ -1,0 +1,234 @@
+\documentclass[UTF8]{ctexart}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs,longtable,array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    citecolor=black
+}
+
+\setlist[itemize]{leftmargin=2em}
+
+\title{\texttt{mra.py} 最近一次提交变更说明}
+\author{}
+\date{2026-03-30}
+
+\begin{document}
+
+\maketitle
+
+\section{文档范围}
+
+本文档说明 \texttt{mra.py} 在最近一次涉及该文件的提交中发生了哪些变化。比较基准为：
+\begin{itemize}
+    \item 当前提交：\texttt{3ac17056cbf19bdc0188b473956c9b438af3ceb0}
+    \item 提交信息：\texttt{IMPORTANT: optimize mra.py}
+    \item 提交时间：2026-03-30 03:55:08 +0800
+    \item 对比对象：该提交的父提交版本
+\end{itemize}
+
+另外，当前工作区相对 \texttt{HEAD} 没有新的未提交改动。因此，本文档描述的是“最近一次\textbf{已提交}变更”，而不是“当前未提交 diff”。
+
+\section{变更规模与总体结论}
+
+根据 \texttt{git diff --numstat HEAD\^{} HEAD -- mra.py} 的结果，本次提交对 \texttt{mra.py} 的改动规模为：
+\begin{itemize}
+    \item 新增 360 行；
+    \item 删除 97 行。
+\end{itemize}
+
+从整体上看，这次提交\textbf{没有大改 AGF-ADNet 主体网络结构}，重点变化集中在训练与检测流程上。脚本的角色从“单模型重构误差检测脚本”，调整为更偏向“可复现实验 + 多种子集成 + 持续故障检测”的完整 pipeline。
+
+\section{高层变化概览}
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}p{0.31\linewidth} >{\raggedright\arraybackslash}p{0.33\linewidth}}
+\toprule
+模块 & 旧版本 & 新版本 \\
+\midrule
+\endhead
+运行环境与可复现性 & 没有统一随机种子入口；未显式设置 Matplotlib 缓存目录 & 新增 \texttt{seed\_everything()}、\texttt{EPS} 常量，以及 \texttt{MPLCONFIGDIR=/tmp/matplotlib} \\
+标准化逻辑 & \texttt{DatasetBuilder} 内部直接持有 \texttt{StandardScaler}，以 0 填充 NaN 后缩放 & \texttt{DatasetBuilder} 改为支持 NaN-aware 均值/方差；但 \texttt{train()} 主路径又显式回退到 0 填充 + \texttt{StandardScaler} 基线 \\
+训练方式 & 单个 \texttt{AGF\_ADNet} 训练 3 个 epoch，直接取最佳 state & 抽出 \texttt{train\_single\_agf\_model()}，按多个 seed 训练，并支持 checkpoint 读写 \\
+检测策略 & 训练集分数阈值 = 均值 + 2 倍标准差；测试集逐点判异常 & 引入 EWMA 平滑、最短持续长度约束，面向持续故障检测 \\
+评估输出 & 只输出一套点式分类指标 & 同时输出原始逐点评估与持续故障评估两套指标 \\
+可视化 & 只画单条异常分数曲线 & 可叠加原始分数与平滑分数，图标题与坐标含义同步更新 \\
+\bottomrule
+\end{longtable}
+
+\section{逐项变更说明}
+
+\subsection{运行时与基础设施改造}
+
+文件头部新增了 \texttt{copy}、\texttt{os}、\texttt{random} 的整理导入，并补充了：
+\begin{itemize}
+    \item \texttt{os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")}；
+    \item \texttt{EPS = 1e-6}；
+    \item \texttt{seed\_everything(seed=40)}。
+\end{itemize}
+
+这部分改动的直接作用有两个：
+\begin{itemize}
+    \item 让脚本在受限环境里使用 Matplotlib 时更稳定，减少缓存目录权限问题；
+    \item 让 NumPy、PyTorch、CUDA 相关随机行为尽量固定，提升多次实验的一致性。
+\end{itemize}
+
+\subsection{数据标准化逻辑发生了“探索后回退”的变化}
+
+旧版本中，\texttt{DatasetBuilder} 的 \texttt{fit\_scaler()} 与 \texttt{transform()} 都依赖内部保存的 \texttt{StandardScaler}。处理方式很直接：先把 NaN 位置填成 0，再做标准化。
+
+新版本里，\texttt{DatasetBuilder} 被改造成了另一套接口：
+\begin{itemize}
+    \item 不再保存 \texttt{self.scaler}；
+    \item 改为保存 \texttt{feature\_mean} 和 \texttt{feature\_std}；
+    \item 只基于观测值计算均值与标准差；
+    \item 缺失位置在缩放后被重新置为 0。
+\end{itemize}
+
+这说明作者曾尝试把预处理改成“对缺失值更友好”的 NaN-aware 标准化。
+
+但是，\texttt{train()} 主流程随后又显式写回了另一条路径：
+\begin{itemize}
+    \item 先对训练集和测试集做 \texttt{np.nan\_to\_num(..., nan=0.0)}；
+    \item 再重新实例化一个局部 \texttt{StandardScaler()}；
+    \item 并在注释中明确说明：保留原本的 0 填充标准化，因为它在该数据集上效果更好，还能保留缺失模式线索。
+\end{itemize}
+
+因此，这次提交在标准化部分的真实结论不是“彻底切换到了 NaN-aware 标准化”，而是：
+\begin{quote}
+代码里增加了一套 NaN-aware 预处理实现，但当前主训练路径最终仍然采用原始的 0 填充 + \texttt{StandardScaler} 方案。
+\end{quote}
+
+\subsection{新增了一批检测辅助函数}
+
+本次提交在 \texttt{anomaly\_scores()} 前后新增了多组辅助函数，作用可以分成两类。
+
+\paragraph{第一类：面向去噪/代理异常验证的实验性函数}
+\begin{itemize}
+    \item \texttt{build\_type\_index()}
+    \item \texttt{build\_denoising\_masks()}
+    \item \texttt{create\_pseudo\_anomalies()}
+    \item \texttt{evaluate\_proxy\_detection()}
+\end{itemize}
+
+这些函数的意图比较明显：
+\begin{itemize}
+    \item 构造额外遮挡掩码；
+    \item 人工生成伪异常窗口；
+    \item 用“正常窗口 vs 伪异常窗口”的可分性来做代理验证。
+\end{itemize}
+
+不过从当前代码调用关系看，这些函数\textbf{尚未接入} \texttt{train()} 主流程。也就是说，它们更像是为后续实验预留的能力，而不是已经生效的正式训练逻辑。
+
+\paragraph{第二类：面向持续故障检测的正式函数}
+\begin{itemize}
+    \item \texttt{ewma\_smooth()}
+    \item \texttt{enforce\_min\_run()}
+    \item \texttt{persistent\_fault\_detection()}
+\end{itemize}
+
+这三者已经被主流程实际调用，构成了新的检测后处理逻辑：
+\begin{enumerate}
+    \item 先对训练分数和测试分数做 EWMA 平滑；
+    \item 再根据平滑后的训练分数计算阈值；
+    \item 最后把连续长度不足的短暂告警过滤掉，只保留持续时间足够长的异常段。
+\end{enumerate}
+
+这意味着检测目标从“单点是否越阈值”，转向了“是否出现了足够持续的故障区间”。
+
+\subsection{训练逻辑从单模型改成多种子集成}
+
+旧版本的训练流程比较直接：
+\begin{itemize}
+    \item 建一个 \texttt{AGF\_ADNet}；
+    \item 用 Adam 训练 3 个 epoch；
+    \item 使用 \texttt{ReduceLROnPlateau} 调整学习率；
+    \item 保存最佳 state；
+    \item 用单模型在训练集上估阈值，在测试集上评估。
+\end{itemize}
+
+新版本把这部分重构成了两层逻辑。
+
+\paragraph{单模型训练层}
+新增 \texttt{train\_single\_agf\_model()}，负责：
+\begin{itemize}
+    \item 设定随机种子；
+    \item 构建模型；
+    \item 可选地从 checkpoint 直接加载；
+    \item 否则执行训练、梯度裁剪、最佳参数保存；
+    \item 训练完成后把模型写回 checkpoint。
+\end{itemize}
+
+\paragraph{外层集成层}
+\texttt{train()} 里新增了：
+\begin{itemize}
+    \item \texttt{ENSEMBLE\_SEEDS = (40, 41, 42)}；
+    \item \texttt{CKPT\_DIR = "./agf\_adnet\_checkpoints"}；
+    \item 对每个 seed 分别训练/加载一个模型；
+    \item 最后对多模型的训练分数和测试分数做平均。
+\end{itemize}
+
+因此，当前脚本的核心检测器不再是“一个 AGF-ADNet”，而是“多个种子训练出来的 AGF-ADNet 集成均值分数”。
+
+\subsection{阈值与评估目标被重新定义}
+
+旧版本中，核心判定规则是：
+\begin{equation}
+\text{threshold} = \mu_{\text{train}} + 2 \sigma_{\text{train}}
+\end{equation}
+然后直接对测试集分数逐点二值化。
+
+新版本把评估拆成了两层：
+\begin{itemize}
+    \item 原始逐点评估：先计算原始分数，再用 \texttt{mean + 1std} 得到一个原始阈值，并输出一套 raw metrics；
+    \item 持续故障评估：对分数做 EWMA 平滑，并使用
+    \begin{equation}
+    \text{threshold} = \mu_{\text{smoothed train}} + 1.5 \sigma_{\text{smoothed train}}
+    \end{equation}
+    再叠加最短持续长度约束，输出 persistent metrics。
+\end{itemize}
+
+默认超参数也因此更偏“持续事件检测”：
+\begin{itemize}
+    \item \texttt{EWMA\_ALPHA = 0.02}
+    \item \texttt{THRESHOLD\_STD = 1.5}
+    \item \texttt{MIN\_RUN = 150}
+\end{itemize}
+
+这部分是本次提交最重要的语义变化：\textbf{脚本不再只是做逐点异常检测，而是在显式追求持续故障的稳定识别。}
+
+\subsection{结果输出与绘图方式同步调整}
+
+\texttt{plot\_results()} 也随之被改写：
+\begin{itemize}
+    \item 新增 \texttt{raw\_scores=None} 参数；
+    \item 可以在图中同时绘制原始异常分数和平滑异常分数；
+    \item 纵轴名称从“重构误差”改成“异常分数”；
+    \item 图标题从“AGF-ADNet异常检测”改成“AGF-ADNet持续故障检测”；
+    \item 保存图片后不再 \texttt{plt.show()}，而是 \texttt{plt.close()}。
+\end{itemize}
+
+这些改动和前面的训练/评估调整是完全一致的：可视化的解释对象也从单点误差转向了平滑后的持续异常趋势。
+
+\section{当前代码状态中的几个注意点}
+
+\begin{itemize}
+    \item \texttt{fit\_scaler()} 和 \texttt{transform()} 仍保留在 \texttt{DatasetBuilder} 中，但当前 \texttt{train()} 主流程没有调用它们。
+    \item \texttt{build\_type\_index()}、\texttt{build\_denoising\_masks()}、\texttt{create\_pseudo\_anomalies()}、\texttt{evaluate\_proxy\_detection()} 当前也没有接入正式流程。
+    \item \texttt{train()} 里仍然保留了一个 \texttt{train\_loader} 局部变量，但后续实际上没有再使用它；这更像是重构后留下的残余代码。
+    \item 主体网络模块（图学习、GCN、TCN、频域分支、Transformer 头等）基本保持不变，所以本次提交的重点是 pipeline 优化，而不是 backbone 改写。
+\end{itemize}
+
+\section{一句话总结}
+
+如果用一句话概括本次提交，那么最准确的表述是：
+\begin{quote}
+\texttt{mra.py} 从“单模型、单阈值、逐点异常判定”的脚本，升级成了“可复现、多种子集成、带平滑与持续长度约束的持续故障检测 pipeline”；同时保留了一些尚未正式接入主流程的实验性函数与预处理分支。
+\end{quote}
+
+\end{document}
