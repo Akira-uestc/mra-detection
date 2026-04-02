@@ -61,16 +61,18 @@ def plot_results(
     save_path: Path | None = None,
 ) -> None:
     if save_path is None:
-        save_path = Path(__file__).resolve().parent.parent / "outputs" / "mc_cnn_detection.png"
+        save_path = (
+            Path(__file__).resolve().parent.parent / "outputs" / "mc_cnn_detection.png"
+        )
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(6, 5))
-    plt.plot(scores, label="Test anomaly score", alpha=0.7)
-    plt.axhline(y=threshold, color="r", linestyle="--", label=f"Threshold ({threshold:.4f})")
-    plt.axvline(x=split_idx, color="g", linestyle=":", label="Test split")
-    plt.xlabel("Test sample index")
-    plt.ylabel("Prediction error")
-    plt.title("MC-CNN anomaly detection")
+    plt.plot(scores, label="测试异常分数", alpha=0.7)
+    plt.axhline(y=threshold, color="r", linestyle="--", label=f"阈值 ({threshold:.4f})")
+    plt.axvline(x=split_idx, color="g", linestyle=":", label="测试集分界")
+    plt.xlabel("测试样本索引")
+    plt.ylabel("异常分数")
+    plt.title("MC-CNN异常检测")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -80,7 +82,9 @@ def plot_results(
     print(f"\nPlot saved to: {save_path}")
 
 
-def load_csv_dir(dir_path: str, file_pattern: str = "*.csv") -> tuple[np.ndarray, np.ndarray, int]:
+def load_csv_dir(
+    dir_path: str, file_pattern: str = "*.csv"
+) -> tuple[np.ndarray, np.ndarray, int]:
     csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
     if not csv_files:
         raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
@@ -107,7 +111,9 @@ def fit_observed_standardizer(train_data: np.ndarray) -> tuple[np.ndarray, np.nd
     return means.astype(np.float32), stds.astype(np.float32)
 
 
-def transform_observed(data: np.ndarray, means: np.ndarray, stds: np.ndarray) -> np.ndarray:
+def transform_observed(
+    data: np.ndarray, means: np.ndarray, stds: np.ndarray
+) -> np.ndarray:
     scaled = (data - means) / stds
     scaled[np.isnan(data)] = np.nan
     return scaled.astype(np.float32)
@@ -153,7 +159,9 @@ def create_windows(
     return np.stack(windows).astype(np.float32), np.stack(masks).astype(np.float32)
 
 
-def infer_process_and_quality_columns(train_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def infer_process_and_quality_columns(
+    train_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     observed_counts = (1.0 - train_mask).sum(axis=0)
     total_rows = train_mask.shape[0]
 
@@ -197,7 +205,9 @@ def prepare_data(
     test_pattern = "test_*.csv"
 
     print("Loading training data...")
-    train_raw, train_mask, num_features = load_csv_dir(str(data_dir / "train"), train_pattern)
+    train_raw, train_mask, num_features = load_csv_dir(
+        str(data_dir / "train"), train_pattern
+    )
     print(f"Training data: {train_raw.shape}, num_features={num_features}")
 
     print("\nLoading test data...")
@@ -228,10 +238,18 @@ def prepare_data(
     y_train_mask = train_mask[:, quality_cols].astype(np.float32)
     y_test_mask = test_mask[:, quality_cols].astype(np.float32)
 
-    dx_train, _ = create_windows(x_train, x_train_mask, seq_len=num_channels, stride=stride)
-    dx_test, _ = create_windows(x_test, x_test_mask, seq_len=num_channels, stride=stride)
-    dy_train, dy_train_mask = create_windows(y_train, y_train_mask, seq_len=num_channels, stride=stride)
-    dy_test, dy_test_mask = create_windows(y_test, y_test_mask, seq_len=num_channels, stride=stride)
+    dx_train, _ = create_windows(
+        x_train, x_train_mask, seq_len=num_channels, stride=stride
+    )
+    dx_test, _ = create_windows(
+        x_test, x_test_mask, seq_len=num_channels, stride=stride
+    )
+    dy_train, dy_train_mask = create_windows(
+        y_train, y_train_mask, seq_len=num_channels, stride=stride
+    )
+    dy_test, dy_test_mask = create_windows(
+        y_test, y_test_mask, seq_len=num_channels, stride=stride
+    )
 
     y_train_latest = dy_train[:, -1, :]
     y_test_latest = dy_test[:, -1, :]
@@ -282,7 +300,9 @@ class SharedNetwork(nn.Module):
 
         conv_out_length = fc_hidden_dim - 4
         if conv_out_length <= 0:
-            raise ValueError("fc_hidden_dim must be at least 5 for the two Conv1d layers.")
+            raise ValueError(
+                "fc_hidden_dim must be at least 5 for the two Conv1d layers."
+            )
 
         self.num_channels = num_channels
         self.num_quality_features = num_quality_features
@@ -339,16 +359,23 @@ class MCCNN(nn.Module):
             latent_dim=latent_dim,
         )
         self.heads = nn.ModuleList(
-            [QualityHead(latent_dim=latent_dim, hidden_dim=head_hidden_dim) for _ in range(num_quality_features)]
+            [
+                QualityHead(latent_dim=latent_dim, hidden_dim=head_hidden_dim)
+                for _ in range(num_quality_features)
+            ]
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         window_pred, features = self.shared(x)
         latest_pred = torch.cat([head(features) for head in self.heads], dim=1)
         return window_pred, latest_pred, features
 
 
-def masked_mse_loss(pred: torch.Tensor, target: torch.Tensor, missing_mask: torch.Tensor) -> torch.Tensor:
+def masked_mse_loss(
+    pred: torch.Tensor, target: torch.Tensor, missing_mask: torch.Tensor
+) -> torch.Tensor:
     observed = 1.0 - missing_mask
     squared_error = (pred - target).pow(2) * observed
     denom = observed.sum().clamp_min(1.0)
@@ -458,7 +485,9 @@ def train_full_model(
     model.load_state_dict(best_state)
 
 
-def score_dataset(model: MCCNN, data_loader: DataLoader, device: torch.device) -> np.ndarray:
+def score_dataset(
+    model: MCCNN, data_loader: DataLoader, device: torch.device
+) -> np.ndarray:
     scores = []
     model.eval()
 
@@ -471,7 +500,9 @@ def score_dataset(model: MCCNN, data_loader: DataLoader, device: torch.device) -
             y_latest_mask = y_latest_mask.to(device)
 
             window_pred, latest_pred, _ = model(dx)
-            window_score, _ = masked_mse_per_sample(window_pred, dy, dy_mask, dims=(1, 2))
+            window_score, _ = masked_mse_per_sample(
+                window_pred, dy, dy_mask, dims=(1, 2)
+            )
             latest_score, latest_count = masked_mse_per_sample(
                 latest_pred,
                 y_latest,
@@ -549,9 +580,13 @@ def train_model() -> None:
     y_pred = (test_scores > threshold).astype(int)
 
     print("\n--- Anomaly detection evaluation ---")
-    print(f"Train score: mean={np.mean(train_scores):.6f}, std={np.std(train_scores):.6f}")
+    print(
+        f"Train score: mean={np.mean(train_scores):.6f}, std={np.std(train_scores):.6f}"
+    )
     print(f"Threshold (mean train score): {threshold:.6f}")
-    print(f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly")
+    print(
+        f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly"
+    )
     print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
     print("\nClassification Metrics:")
