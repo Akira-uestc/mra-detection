@@ -1,17 +1,30 @@
 import torch
-import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import os
-import glob
 import copy
+from pathlib import Path
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 from model.mstransformer import MSTransformer
-from window_utils import apply_ewaf_by_segments, build_prompt_test_windows_with_mask
+from _project_root import PROJECT_ROOT
+from utils.methods.data_loading import load_csv_dir_with_mask
+from utils.methods.display import (
+    compute_binary_classification_metrics,
+    plot_detection_scores,
+    print_metrics,
+)
+from utils.methods.postprocess import (
+    apply_ewaf_by_segments,
+    choose_threshold,
+    infer_segment_lengths,
+    split_index_from_labels,
+)
+from utils.methods.windowing import (
+    build_front_padded_windows_with_mask,
+    build_prompt_test_windows,
+)
 
 import random
 
@@ -33,62 +46,6 @@ def seed_everything(seed=40):
 
 
 seed_everything(40)
-
-
-# ==========================================
-# 1. 数据加载与预处理模块
-# ==========================================
-def load_csv_dir(dir_path, file_pattern="*.csv"):
-    """Load CSV files and return data with a 1=missing mask."""
-    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
-    dfs = []
-    masks = []
-    for f in csv_files:
-        df = pd.read_csv(f, header=None)
-        arr = df.to_numpy(dtype=np.float32)
-        dfs.append(arr)
-        masks.append(np.isnan(arr).astype(np.float32))
-        print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
-    data = np.concatenate(dfs, axis=0)
-    mask = np.concatenate(masks, axis=0)
-    return data, mask, data.shape[1]
-
-
-def create_windows(data, mask, seq_len, stride=1):
-    """创建滑动窗口，与 mra.py 的 create_windows 逻辑一致"""
-    X, M = [], []
-    n = len(data)
-
-    if n == 0:
-        shape = (0, seq_len, data.shape[1])
-        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
-    if stop_idx <= WINDOW_START_INDEX:
-        shape = (0, seq_len, data.shape[1])
-        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-    for i in range(WINDOW_START_INDEX, stop_idx, stride):
-        if i < seq_len:
-            pad_len = seq_len - i - 1
-            window_data = np.concatenate([
-                np.tile(data[0:1], (pad_len, 1)),
-                data[0 : i + 1]
-            ], axis=0)
-            window_mask = np.concatenate([
-                np.tile(mask[0:1], (pad_len, 1)),
-                mask[0 : i + 1]
-            ], axis=0)
-        else:
-            window_data = data[i - seq_len + 1 : i + 1]
-            window_mask = mask[i - seq_len + 1 : i + 1]
-
-        X.append(window_data)
-        M.append(window_mask)
-
-    return np.stack(X).astype(np.float32), np.stack(M).astype(np.float32)
 
 
 def build_type_index(seq_len, batch_size, sampling_rate, device):
@@ -191,17 +148,23 @@ def score_dataset(model, windows, masks, device, sampling_rate, batch_size=32):
 # ==========================================
 def run_full_detection():
     # --- A. 准备数据 ---
-    DATA_DIR = "./data"
+    DATA_DIR = PROJECT_ROOT / "data"
     TRAIN_PATTERN = "train_*.csv"
     TEST_PATTERN  = "test_*.csv"
-    CKPT_PATH = "./mstransformer_model.pth"
+    CKPT_PATH = PROJECT_ROOT / "mstransformer_model.pth"
 
     print("Loading training data...")
-    train_data, train_mask, num_features = load_csv_dir(os.path.join(DATA_DIR, "train"), TRAIN_PATTERN)
+    train_data, train_mask, num_features = load_csv_dir_with_mask(
+        DATA_DIR / "train",
+        TRAIN_PATTERN,
+    )
     print(f"Training data: {train_data.shape}, num_features={num_features}")
 
     print("\nLoading test data...")
-    test_data, test_mask, _ = load_csv_dir(os.path.join(DATA_DIR, "test"), TEST_PATTERN)
+    test_data, test_mask, _ = load_csv_dir_with_mask(
+        DATA_DIR / "test",
+        TEST_PATTERN,
+    )
     print(f"Test data: {test_data.shape}")
 
     # 处理 NaN
@@ -223,8 +186,15 @@ def run_full_detection():
     mask_ratio = 0.15
 
     # --- C. 创建滑动窗口 ---
-    X_train, M_train = create_windows(train_scaled, train_mask, seq_len=window_size, stride=1)
-    X_test, M_test, test_labels = build_prompt_test_windows_with_mask(
+    X_train, M_train = build_front_padded_windows_with_mask(
+        train_scaled,
+        train_mask,
+        seq_len=window_size,
+        stride=1,
+        start_index=WINDOW_START_INDEX,
+        max_window_count=WINDOW_SAMPLE_COUNT,
+    )
+    X_test, M_test, test_labels = build_prompt_test_windows(
         test_scaled,
         test_mask,
         seq_len=window_size,
@@ -271,7 +241,7 @@ def run_full_detection():
     train_scores = score_dataset(model, X_train, M_train, device=device, sampling_rate=s_rate, batch_size=batch_size)
     if USE_EWAF:
         train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
-    threshold = float(np.mean(train_scores)+np.std(train_scores))
+    threshold = choose_threshold(train_scores, method="mean_std", std_factor=1.0)
 
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")
@@ -280,12 +250,12 @@ def run_full_detection():
 
     # --- F. 计算测试集异常分数 ---
     test_scores_arr = score_dataset(model, X_test, M_test, device=device, sampling_rate=s_rate, batch_size=batch_size)
-    split_idx = int(np.sum(test_labels == 0))
+    split_idx = split_index_from_labels(test_labels)
     if USE_EWAF:
         test_scores_arr = apply_ewaf_by_segments(
             test_scores_arr,
             EWAF_ALPHA,
-            [split_idx, len(test_scores_arr) - split_idx],
+            infer_segment_lengths(test_labels),
         )
 
     print(f"\nAnomaly Detection Results:")
@@ -299,44 +269,23 @@ def run_full_detection():
     y_true = test_labels
     y_pred = (test_scores_arr > threshold).astype(int)
 
-    acc = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    rec = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-    normal_mask = y_true == 0
-    fault_mask = y_true == 1
-    fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
-    fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
-
-    print(f"\nClassification Metrics:")
-    print(f"  Accuracy:  {acc:.4f}")
-    print(f"  Precision: {prec:.4f}")
-    print(f"  Recall:    {rec:.4f}")
-    print(f"  FDR:       {fdr:.4f}")
-    print(f"  FRA:       {fra:.4f}")
-    print(f"  F1-Score:  {f1:.4f}")
+    metrics = compute_binary_classification_metrics(y_true, y_pred)
+    print_metrics(
+        "\nClassification Metrics:",
+        metrics,
+        order=["accuracy", "precision", "recall", "fdr", "fra", "f1"],
+    )
 
     # --- G. 结果可视化 ---
-    plot_results(test_scores_arr, threshold, split_idx)
-
-
-def plot_results(scores, threshold, split_idx):
-    """可视化异常检测结果"""
-    plt.figure(figsize=(6, 5))
-
-    plt.plot(scores, label='测试异常分数', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
-    plt.xlabel('测试样本索引')
-    plt.ylabel('重构误差')
-    plt.title('Multirate Former 异常检测')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_metrics.png', dpi=150)
-    plt.show()
-    print("图表已保存为 anomaly_detection_metrics.png")
+    plot_detection_scores(
+        test_scores_arr,
+        threshold,
+        split_idx,
+        PROJECT_ROOT / "anomaly_detection_metrics.png",
+        title="Multirate Former 异常检测",
+        ylabel="重构误差",
+        show=True,
+    )
 
 
 if __name__ == "__main__":

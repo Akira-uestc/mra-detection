@@ -19,24 +19,36 @@ Repo-specific adaptation:
 from __future__ import annotations
 
 import copy
-import glob
 import os
 import random
 from dataclasses import dataclass
-from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader, TensorDataset
 
-from window_utils import apply_ewaf_by_segments, build_prompt_test_windows_with_mask
+from _project_root import PROJECT_ROOT
+from utils.methods.data_loading import load_csv_dir_with_mask
+from utils.methods.display import (
+    compute_binary_classification_metrics,
+    plot_detection_scores,
+    print_metrics,
+)
+from utils.methods.postprocess import (
+    apply_ewaf_by_segments,
+    choose_threshold,
+    infer_segment_lengths,
+    split_index_from_labels,
+)
+from utils.methods.windowing import (
+    build_front_padded_windows_with_mask,
+    build_prompt_test_windows,
+)
 
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
@@ -58,55 +70,6 @@ def seed_everything(seed: int = 42) -> None:
     torch.backends.cudnn.benchmark = False
 
 
-def plot_results(
-    scores: np.ndarray,
-    threshold: float,
-    split_idx: int,
-    save_path: Path | None = None,
-) -> None:
-    if save_path is None:
-        save_path = (
-            Path(__file__).resolve().parent.parent / "outputs" / "mc_cnn_detection.png"
-        )
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    plt.figure(figsize=(6, 5))
-    plt.plot(scores, label="测试异常分数", alpha=0.7)
-    plt.axhline(y=threshold, color="r", linestyle="--", label=f"阈值 ({threshold:.4f})")
-    plt.axvline(x=split_idx, color="g", linestyle=":", label="测试集分界")
-    plt.xlabel("测试样本索引")
-    plt.ylabel("异常分数")
-    plt.title("MC-CNN异常检测")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"\nPlot saved to: {save_path}")
-
-
-def load_csv_dir(
-    dir_path: str, file_pattern: str = "*.csv"
-) -> tuple[np.ndarray, np.ndarray, int]:
-    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
-
-    arrays = []
-    masks = []
-    for file_path in csv_files:
-        df = pd.read_csv(file_path, header=None)
-        values = df.to_numpy(dtype=np.float32)
-        arrays.append(values)
-        masks.append(np.isnan(values).astype(np.float32))
-        print(f"  Loaded {file_path}: {len(df)} rows, {df.shape[1]} cols")
-
-    data = np.concatenate(arrays, axis=0)
-    mask = np.concatenate(masks, axis=0)
-    return data, mask, data.shape[1]
-
-
 def fit_observed_standardizer(train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     means = np.nanmean(train_data, axis=0)
     stds = np.nanstd(train_data, axis=0)
@@ -123,44 +86,6 @@ def transform_observed(
     return scaled.astype(np.float32)
 
 
-def create_windows(
-    data: np.ndarray,
-    mask: np.ndarray,
-    seq_len: int,
-    stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    windows = []
-    masks = []
-    n = len(data)
-
-    if n == 0:
-        shape = (0, seq_len, data.shape[1])
-        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
-    if stop_idx <= WINDOW_START_INDEX:
-        shape = (0, seq_len, data.shape[1])
-        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-    for i in range(WINDOW_START_INDEX, stop_idx, stride):
-        if i < seq_len:
-            pad_len = seq_len - i - 1
-            window_data = np.concatenate(
-                [np.tile(data[0:1], (pad_len, 1)), data[0 : i + 1]],
-                axis=0,
-            )
-            window_mask = np.concatenate(
-                [np.tile(mask[0:1], (pad_len, 1)), mask[0 : i + 1]],
-                axis=0,
-            )
-        else:
-            window_data = data[i - seq_len + 1 : i + 1]
-            window_mask = mask[i - seq_len + 1 : i + 1]
-
-        windows.append(window_data)
-        masks.append(window_mask)
-
-    return np.stack(windows).astype(np.float32), np.stack(masks).astype(np.float32)
 
 
 def infer_process_and_quality_columns(
@@ -205,18 +130,22 @@ def prepare_data(
     stride: int = 1,
     batch_size: int = 128,
 ) -> PreparedData:
-    data_dir = Path(__file__).resolve().parent.parent / "data"
+    data_dir = PROJECT_ROOT / "data"
     train_pattern = "train_*.csv"
     test_pattern = "test_*.csv"
 
     print("Loading training data...")
-    train_raw, train_mask, num_features = load_csv_dir(
-        str(data_dir / "train"), train_pattern
+    train_raw, train_mask, num_features = load_csv_dir_with_mask(
+        data_dir / "train",
+        train_pattern,
     )
     print(f"Training data: {train_raw.shape}, num_features={num_features}")
 
     print("\nLoading test data...")
-    test_raw, test_mask, _ = load_csv_dir(str(data_dir / "test"), test_pattern)
+    test_raw, test_mask, _ = load_csv_dir_with_mask(
+        data_dir / "test",
+        test_pattern,
+    )
     print(f"Test data: {test_raw.shape}")
 
     means, stds = fit_observed_standardizer(train_raw)
@@ -243,17 +172,33 @@ def prepare_data(
     y_train_mask = train_mask[:, quality_cols].astype(np.float32)
     y_test_mask = test_mask[:, quality_cols].astype(np.float32)
 
-    dx_train, _ = create_windows(
-        x_train, x_train_mask, seq_len=num_channels, stride=stride
+    dx_train, _ = build_front_padded_windows_with_mask(
+        x_train,
+        x_train_mask,
+        seq_len=num_channels,
+        stride=stride,
+        start_index=WINDOW_START_INDEX,
+        max_window_count=WINDOW_SAMPLE_COUNT,
     )
-    dx_test, _, test_labels = build_prompt_test_windows_with_mask(
-        x_test, x_test_mask, seq_len=num_channels, stride=stride
+    dx_test, _, test_labels = build_prompt_test_windows(
+        x_test,
+        x_test_mask,
+        seq_len=num_channels,
+        stride=stride,
     )
-    dy_train, dy_train_mask = create_windows(
-        y_train, y_train_mask, seq_len=num_channels, stride=stride
+    dy_train, dy_train_mask = build_front_padded_windows_with_mask(
+        y_train,
+        y_train_mask,
+        seq_len=num_channels,
+        stride=stride,
+        start_index=WINDOW_START_INDEX,
+        max_window_count=WINDOW_SAMPLE_COUNT,
     )
-    dy_test, dy_test_mask, _ = build_prompt_test_windows_with_mask(
-        y_test, y_test_mask, seq_len=num_channels, stride=stride
+    dy_test, dy_test_mask, _ = build_prompt_test_windows(
+        y_test,
+        y_test_mask,
+        seq_len=num_channels,
+        stride=stride,
     )
 
     y_train_latest = dy_train[:, -1, :]
@@ -573,21 +518,22 @@ def train_model() -> None:
     test_scores = score_dataset(model, data.test_loader, device)
     if USE_EWAF:
         train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
-    threshold = float(np.mean(train_scores))
+    threshold = choose_threshold(train_scores, method="mean")
 
     y_true = data.test_labels
-    split_idx = int(np.sum(y_true == 0))
+    split_idx = split_index_from_labels(y_true)
     if USE_EWAF:
         test_scores = apply_ewaf_by_segments(
             test_scores,
             EWAF_ALPHA,
-            [split_idx, len(test_scores) - split_idx],
+            infer_segment_lengths(y_true),
         )
     y_pred = (test_scores > threshold).astype(int)
-    normal_mask = y_true == 0
-    fault_mask = y_true == 1
-    fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
-    fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
+    metrics = compute_binary_classification_metrics(
+        y_true,
+        y_pred,
+        threshold=threshold,
+    )
 
     print("\n--- Anomaly detection evaluation ---")
     print(
@@ -599,18 +545,19 @@ def train_model() -> None:
     )
     print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-    print("\nClassification Metrics:")
-    print(f"  Accuracy:  {accuracy_score(y_true, y_pred):.4f}")
-    print(f"  Precision: {precision_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"  Recall:    {recall_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"  FDR:       {fdr:.4f}")
-    print(f"  FRA:       {fra:.4f}")
-    print(f"  F1-Score:  {f1_score(y_true, y_pred, zero_division=0):.4f}")
+    print_metrics(
+        "\nClassification Metrics:",
+        metrics,
+        order=["threshold", "accuracy", "precision", "recall", "fdr", "fra", "f1"],
+    )
 
-    plot_results(
-        scores=test_scores,
-        threshold=threshold,
-        split_idx=split_idx,
+    plot_detection_scores(
+        test_scores,
+        threshold,
+        split_idx,
+        PROJECT_ROOT / "outputs" / "mc_cnn_detection.png",
+        title="MC-CNN异常检测",
+        ylabel="异常分数",
     )
 
 

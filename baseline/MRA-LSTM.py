@@ -5,7 +5,6 @@ Based on Multirate-Aware LSTM"
 """
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,13 +12,23 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 import warnings
-import os
-import glob
-from pathlib import Path
-from window_utils import (
+from _project_root import PROJECT_ROOT
+from utils.methods.data_loading import load_csv_dir_values
+from utils.methods.display import (
+    compute_binary_classification_metrics,
+    plot_detection_scores,
+    print_metrics,
+)
+from utils.methods.postprocess import (
+    apply_ewaf_by_segments,
+    choose_threshold,
+    infer_segment_lengths,
+    split_index_from_labels,
+)
+from utils.methods.windowing import (
     TEST_SEGMENT_LENGTH,
     TEST_WINDOW_COUNT,
-    apply_ewaf_by_segments,
+    build_forecasting_windows,
 )
 warnings.filterwarnings('ignore')
 
@@ -32,81 +41,30 @@ USE_EWAF = True
 EWAF_ALPHA = 0.15
 
 class SequenceDataset(Dataset):
-    """Dataset for multirate data.
+    """Dataset for multirate data."""
 
-    Training uses front-padding sliding windows.
-    Testing follows mra.py and builds windows within the normal/fault segments
-    independently, so fault windows do not cross the test split.
-    """
-    def __init__(self, data, sequence_length=30,
-                 prediction_horizon=1, stride=1, training=True):
+    def __init__(
+        self,
+        data,
+        sequence_length=30,
+        prediction_horizon=1,
+        stride=1,
+        training=True,
+    ):
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.training = training
-
-        values = data.astype(np.float32)
-        n = len(values)
-        self.x_windows = []
-        self.y_windows = []
-        self.labels = []
-
-        if training:
-            stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
-
-            for i in range(WINDOW_START_INDEX, stop_idx, stride):
-                if i < sequence_length:
-                    pad_len = sequence_length - i - 1
-                    window = np.concatenate([
-                        np.tile(values[0:1], (pad_len, 1)),
-                        values[0:i + 1]
-                    ], axis=0)
-                else:
-                    window = values[i - sequence_length + 1:i + 1]
-
-                y_start = i + 1
-                y_end = y_start + prediction_horizon
-                if y_end <= n:
-                    target = values[y_start:y_end]
-                else:
-                    available = values[y_start:n] if y_start < n else values[-1:]
-                    pad_needed = prediction_horizon - len(available)
-                    target = np.concatenate([
-                        available,
-                        np.tile(values[-1:], (pad_needed, 1))
-                    ], axis=0)
-
-                self.x_windows.append(window)
-                self.y_windows.append(target)
-                self.labels.append(0)
-        else:
-            stop_idx = min(TEST_SEGMENT_LENGTH, sequence_length + TEST_WINDOW_COUNT)
-
-            for segment_start, label in ((0, 0), (TEST_SEGMENT_LENGTH, 1)):
-                segment_values = values[segment_start : segment_start + TEST_SEGMENT_LENGTH]
-                if len(segment_values) < sequence_length:
-                    continue
-
-                for end_idx in range(sequence_length, stop_idx, stride):
-                    if end_idx > len(segment_values):
-                        break
-
-                    window = segment_values[end_idx - sequence_length : end_idx]
-                    global_end_idx = segment_start + end_idx - 1
-                    y_start = global_end_idx + 1
-                    y_end = y_start + prediction_horizon
-                    if y_end <= n:
-                        target = values[y_start:y_end]
-                    else:
-                        available = values[y_start:n] if y_start < n else values[-1:]
-                        pad_needed = prediction_horizon - len(available)
-                        target = np.concatenate([
-                            available,
-                            np.tile(values[-1:], (pad_needed, 1))
-                        ], axis=0)
-
-                    self.x_windows.append(window)
-                    self.y_windows.append(target)
-                    self.labels.append(label)
+        self.x_windows, self.y_windows, self.labels = build_forecasting_windows(
+            data.astype(np.float32),
+            sequence_length,
+            prediction_horizon,
+            stride,
+            training=training,
+            start_index=WINDOW_START_INDEX,
+            max_window_count=WINDOW_SAMPLE_COUNT,
+            test_segment_length=TEST_SEGMENT_LENGTH,
+            test_window_count=TEST_WINDOW_COUNT,
+        )
 
     def __len__(self):
         return len(self.x_windows)
@@ -430,35 +388,18 @@ class MRALSTM(nn.Module):
         return predictions
 
 
-def load_csv_dir(dir_path, file_pattern="*.csv"):
-    """Load all CSV files matching file_pattern from a directory and concatenate.
-    CSVs are headerless with numeric columns.
-    Returns (data, num_features).
-    """
-    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
-    dfs = []
-    for f in csv_files:
-        df = pd.read_csv(f, header=None)
-        dfs.append(df)
-        print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
-    data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
-    return data, data.shape[1]
-
-
 def load_and_preprocess_data():
     """Load and preprocess data from data/ directory"""
-    DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+    DATA_DIR = PROJECT_ROOT / "data"
     TRAIN_PATTERN = "train_*.csv"
     TEST_PATTERN  = "test_*.csv"
 
     print("Loading training data...")
-    train_data, num_features = load_csv_dir(str(DATA_DIR / "train"), TRAIN_PATTERN)
+    train_data, num_features = load_csv_dir_values(DATA_DIR / "train", TRAIN_PATTERN)
     print(f"Training data: {train_data.shape}, num_features={num_features}")
 
     print("\nLoading test data...")
-    test_data, _ = load_csv_dir(str(DATA_DIR / "test"), TEST_PATTERN)
+    test_data, _ = load_csv_dir_values(DATA_DIR / "test", TEST_PATTERN)
     print(f"Test data: {test_data.shape}")
 
     # Handle NaN values
@@ -492,8 +433,8 @@ def train_model(model, train_loader, num_epochs=10, lr=0.001, device='cpu'):
 
             # Reshape predictions and targets
             batch_size = x.size(0)
-            predictions = predictions.view(batch_size, -1)
-            y = y.view(batch_size, -1)
+            predictions = predictions.reshape(batch_size, -1)
+            y = y.reshape(batch_size, -1)
 
             loss = criterion(predictions, y)
             loss.backward()
@@ -532,8 +473,8 @@ def compute_anomaly_scores(model, test_loader, device='cpu'):
 
             # Compute error for each sample
             batch_size = x.size(0)
-            predictions = predictions.view(batch_size, -1)
-            y = y.view(batch_size, -1)
+            predictions = predictions.reshape(batch_size, -1)
+            y = y.reshape(batch_size, -1)
 
             errors = criterion(predictions, y)
             sample_errors = errors.mean(dim=1)
@@ -543,7 +484,12 @@ def compute_anomaly_scores(model, test_loader, device='cpu'):
             all_predictions.append(predictions.cpu().numpy())
             all_targets.append(y.cpu().numpy())
 
-    return np.array(all_errors), np.array(all_labels), np.vstack(all_predictions), np.vstack(all_targets)
+    return (
+        np.asarray(all_errors, dtype=np.float32),
+        np.asarray(all_labels, dtype=np.int64),
+        np.vstack(all_predictions),
+        np.vstack(all_targets),
+    )
 
 
 def compute_anomaly_scores_train(model, train_loader, device='cpu'):
@@ -561,67 +507,15 @@ def compute_anomaly_scores_train(model, train_loader, device='cpu'):
 
             # Compute error for each sample
             batch_size = x.size(0)
-            predictions = predictions.view(batch_size, -1)
-            y = y.view(batch_size, -1)
+            predictions = predictions.reshape(batch_size, -1)
+            y = y.reshape(batch_size, -1)
 
             errors = criterion(predictions, y)
             sample_errors = errors.mean(dim=1)
 
             all_errors.extend(sample_errors.cpu().numpy())
 
-    return np.array(all_errors)
-
-def compute_threshold_static(errors, percentile=95):
-    """Compute static threshold based on percentile"""
-    return np.percentile(errors, percentile)
-
-
-def evaluate_detection(errors, labels, threshold):
-    """Evaluate anomaly detection performance"""
-    predictions = (errors > threshold).astype(int)
-    true_labels = (labels > 0).astype(int)
-
-    TP = np.sum((predictions == 1) & (true_labels == 1))
-    TN = np.sum((predictions == 0) & (true_labels == 0))
-    FP = np.sum((predictions == 1) & (true_labels == 0))
-    FN = np.sum((predictions == 0) & (true_labels == 1))
-
-    accuracy = (TP + TN) / (TP + TN + FP + FN + 1e-10)
-    precision = TP / (TP + FP + 1e-10)
-    recall = TP / (TP + FN + 1e-10)
-    f1 = 2 * precision * recall / (precision + recall + 1e-10)
-    specificity = TN / (TN + FP + 1e-10)
-    fra = FP / (FP + TN + 1e-10)
-    fdr = TP / (TP + FN + 1e-10)
-
-    return {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'fdr': fdr,
-        'fra': fra,
-        'f1': f1,
-        'specificity': specificity,
-        'TP': TP, 'TN': TN, 'FP': FP, 'FN': FN
-    }
-
-
-def plot_anomaly_detection(errors, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
-    """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
-    plt.figure(figsize=(6, 5))
-    plt.plot(errors, label='测试异常分数', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
-    plt.xlabel('测试样本索引')
-    plt.ylabel('重构误差')
-    plt.title('MRA-LSTM异常检测')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    print(f"\nPlot saved to: {save_path}")
-    plt.show()
+    return np.asarray(all_errors, dtype=np.float32)
 
 
 def plot_training_loss(losses, save_path='training_loss.png'):
@@ -656,15 +550,15 @@ def main():
 
     # Load and preprocess data
     print("Loading and preprocessing data...")
-    train_data, test_data, num_features, scaler = load_and_preprocess_data()
+    train_data, test_data, num_features, _ = load_and_preprocess_data()
     print(f"Number of features: {num_features}")
 
     # Create datasets and dataloaders
     train_dataset = SequenceDataset(train_data, sequence_length, prediction_horizon, training=True)
     test_dataset = SequenceDataset(test_data, sequence_length, prediction_horizon, training=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
 
     print(f"Training sequences: {len(train_dataset)}, Test sequences: {len(test_dataset)}")
 
@@ -704,41 +598,67 @@ def main():
         train_errors = apply_ewaf_by_segments(train_errors, EWAF_ALPHA)
     print(f"Training error stats - mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}")
 
-    threshold_train = float(np.mean(train_errors))
+    threshold_train = choose_threshold(train_errors, method="mean")
     print(f"Training-based threshold (mean train score): {threshold_train:.6f}")
 
     # Compute anomaly scores on test data
     print("\nComputing test anomaly scores...")
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
-    split_idx = int(np.sum(labels == 0))
+    split_idx = split_index_from_labels(labels)
     if USE_EWAF:
         test_errors = apply_ewaf_by_segments(
             test_errors,
             EWAF_ALPHA,
-            [split_idx, len(test_errors) - split_idx],
+            infer_segment_lengths(labels),
         )
     print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
 
     # Evaluate detection using training-based threshold
-    metrics = evaluate_detection(test_errors, labels, threshold_train)
+    y_pred = (test_errors > threshold_train).astype(int)
+    metrics = compute_binary_classification_metrics(
+        labels,
+        y_pred,
+        threshold=threshold_train,
+        include_specificity=True,
+        include_counts=True,
+    )
     print("\nDetection Performance (using training-based threshold):")
-    print(f"  Accuracy:  {metrics['accuracy']:.4f}")
-    print(f"  Precision: {metrics['precision']:.4f}")
-    print(f"  Recall:    {metrics['recall']:.4f}")
-    print(f"  FDR:       {metrics['fdr']:.4f}")
-    print(f"  FRA:       {metrics['fra']:.4f}")
-    print(f"  F1-Score:  {metrics['f1']:.4f}")
-    print(f"  Specificity: {metrics['specificity']:.4f}")
-    print(f"  TP: {metrics['TP']}, TN: {metrics['TN']}, FP: {metrics['FP']}, FN: {metrics['FN']}")
+    print_metrics(
+        "",
+        metrics,
+        order=[
+            "threshold",
+            "accuracy",
+            "precision",
+            "recall",
+            "fdr",
+            "fra",
+            "f1",
+            "specificity",
+            "TP",
+            "TN",
+            "FP",
+            "FN",
+        ],
+    )
     print(f"  Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_errors)}) anomaly")
 
     # Plot anomaly detection results
     print("\nPlotting anomaly detection results...")
-    plot_anomaly_detection(test_errors, threshold_train, split_idx)
+    plot_detection_scores(
+        test_errors,
+        threshold_train,
+        split_idx,
+        PROJECT_ROOT / "outputs" / "mra_lstm_detection.png",
+        title='MRA-LSTM异常检测',
+        ylabel='重构误差',
+        show=True,
+    )
 
     # Save model
-    torch.save(model.state_dict(), 'mra_lstm_model.pth')
-    print("Model saved to mra_lstm_model.pth")
+    model_path = PROJECT_ROOT / 'mra_lstm_model.pth'
+    torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
     return model, test_errors, labels, threshold_train
 

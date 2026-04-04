@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader, TensorDataset
 
 from freq_reconstruction import FrequencyOnlyReconstructor
@@ -21,17 +20,26 @@ from graph_gcn_reconstruction import (
     GraphGCNReconstructor,
     ObservedStandardScaler,
     adjacency_balance_loss,
-    build_windows,
     configure_chinese_font,
-    load_csv_series,
     save_adjacency_heatmap,
     seed_everything,
     summarize_adjacency,
 )
+from utils.methods.data_loading import load_csv_glob_with_mask
+from utils.methods.display import (
+    compute_binary_classification_metrics,
+    plot_detection_scores,
+    save_training_curve,
+)
+from utils.methods.postprocess import apply_ewaf_by_segments, choose_threshold
+from utils.methods.windowing import (
+    TEST_SEGMENT_LENGTH,
+    TEST_WINDOW_COUNT,
+    build_prompt_test_windows,
+    build_standard_windows,
+    build_windows,
+)
 
-
-TEST_SEGMENT_LENGTH = 2050
-TEST_WINDOW_COUNT = 2000
 TEST_SPLIT_INDEX = 2000
 
 
@@ -125,53 +133,6 @@ def choose_device(device_arg: str | None) -> torch.device:
 def save_csv(data: np.ndarray, feature_names: list[str], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(data, columns=feature_names).to_csv(output_path, index=False)
-
-
-def build_standard_windows(
-    data: np.ndarray,
-    mask: np.ndarray,
-    seq_len: int,
-    stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    if len(data) < seq_len:
-        shape = (0, seq_len, data.shape[1])
-        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-    windows = []
-    window_masks = []
-    for end_idx in range(seq_len, len(data) + 1, stride):
-        windows.append(data[end_idx - seq_len : end_idx])
-        window_masks.append(mask[end_idx - seq_len : end_idx])
-    return np.stack(windows).astype(np.float32), np.stack(window_masks).astype(
-        np.float32
-    )
-
-
-def build_prompt_test_windows(
-    data: np.ndarray,
-    mask: np.ndarray,
-    seq_len: int,
-    stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    windows = []
-    window_masks = []
-    labels = []
-
-    for segment_start, label in ((0, 0), (TEST_SEGMENT_LENGTH, 1)):
-        segment_data = data[segment_start : segment_start + TEST_SEGMENT_LENGTH]
-        segment_mask = mask[segment_start : segment_start + TEST_SEGMENT_LENGTH]
-        stop_idx = min(TEST_SEGMENT_LENGTH, seq_len + TEST_WINDOW_COUNT)
-
-        for end_idx in range(seq_len, stop_idx, stride):
-            windows.append(segment_data[end_idx - seq_len : end_idx])
-            window_masks.append(segment_mask[end_idx - seq_len : end_idx])
-            labels.append(label)
-
-    return (
-        np.stack(windows).astype(np.float32),
-        np.stack(window_masks).astype(np.float32),
-        np.asarray(labels, dtype=np.int64),
-    )
 
 
 def infer_rate_metadata(missing_mask: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
@@ -796,31 +757,6 @@ def combine_scores(
     return train_score.astype(np.float32), eval_score.astype(np.float32)
 
 
-def choose_threshold(
-    train_scores: np.ndarray,
-    std_factor: float,
-    quantile: float,
-) -> float:
-    gaussian_threshold = float(
-        np.mean(train_scores) + std_factor * np.std(train_scores)
-    )
-    quantile_threshold = float(np.quantile(train_scores, quantile))
-    return max(gaussian_threshold, quantile_threshold)
-
-
-def compute_metrics(
-    labels: np.ndarray, scores: np.ndarray, threshold: float
-) -> dict[str, float]:
-    prediction = (scores >= threshold).astype(np.int64)
-    return {
-        "threshold": float(threshold),
-        "accuracy": float(accuracy_score(labels, prediction)),
-        "precision": float(precision_score(labels, prediction, zero_division=0)),
-        "recall": float(recall_score(labels, prediction, zero_division=0)),
-        "f1": float(f1_score(labels, prediction, zero_division=0)),
-    }
-
-
 def apply_min_anomaly_duration(
     prediction: np.ndarray,
     min_duration: int,
@@ -842,129 +778,6 @@ def apply_min_anomaly_duration(
             run_start = None
 
     return filtered
-
-
-def compute_metrics_from_prediction(
-    labels: np.ndarray,
-    prediction: np.ndarray,
-    threshold: float,
-) -> dict[str, float]:
-    return {
-        "threshold": float(threshold),
-        "accuracy": float(accuracy_score(labels, prediction)),
-        "precision": float(precision_score(labels, prediction, zero_division=0)),
-        "recall": float(recall_score(labels, prediction, zero_division=0)),
-        "f1": float(f1_score(labels, prediction, zero_division=0)),
-    }
-
-
-def apply_ewaf(scores: np.ndarray, alpha: float) -> np.ndarray:
-    if not 0.0 < alpha <= 1.0:
-        raise ValueError(f"ewaf alpha 必须在 (0, 1] 内，收到 {alpha}")
-    if scores.size == 0:
-        return scores.astype(np.float32)
-
-    smoothed = np.empty_like(scores, dtype=np.float32)
-    smoothed[0] = np.float32(scores[0])
-    for idx in range(1, len(scores)):
-        smoothed[idx] = np.float32(
-            alpha * scores[idx] + (1.0 - alpha) * smoothed[idx - 1]
-        )
-    return smoothed
-
-
-def apply_ewaf_by_segments(
-    scores: np.ndarray,
-    alpha: float,
-    segment_lengths: list[int] | None = None,
-) -> np.ndarray:
-    if not segment_lengths:
-        return apply_ewaf(scores, alpha)
-
-    parts = []
-    cursor = 0
-    for length in segment_lengths:
-        next_cursor = min(cursor + length, len(scores))
-        parts.append(apply_ewaf(scores[cursor:next_cursor], alpha))
-        cursor = next_cursor
-        if cursor >= len(scores):
-            break
-
-    if cursor < len(scores):
-        parts.append(apply_ewaf(scores[cursor:], alpha))
-
-    return np.concatenate(parts, axis=0).astype(np.float32)
-
-
-def save_training_curve(history: list[dict[str, float]], output_path: Path) -> None:
-    import matplotlib.pyplot as plt
-
-    configure_chinese_font()
-    epochs = np.arange(1, len(history) + 1)
-    total = [item["total_loss"] for item in history]
-    fusion = [item["fusion_loss"] for item in history]
-    detector = [item["detector_loss"] for item in history]
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(epochs, total, label="总损失", color="#1D3557")
-    ax.plot(epochs, fusion, label="插补损失", color="#457B9D")
-    ax.plot(epochs, detector, label="检测损失", color="#E63946")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.set_title("训练曲线")
-    ax.grid(alpha=0.2)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
-
-
-def plot_anomaly_scores(
-    scores: np.ndarray,
-    threshold: float,
-    output_path: Path,
-    title: str,
-) -> None:
-    import matplotlib.pyplot as plt
-
-    configure_chinese_font()
-    fig, ax = plt.subplots(figsize=(16, 5))
-    x_axis = np.arange(1, len(scores) + 1)
-    ax.plot(x_axis, scores, color="#0B6E4F", linewidth=1.6, label="异常分数")
-    ax.axhline(
-        threshold,
-        color="#D1495B",
-        linestyle="--",
-        linewidth=1.4,
-        label=f"阈值 = {threshold:.4f}",
-    )
-    ax.axvline(
-        TEST_SPLIT_INDEX,
-        color="#222222",
-        linestyle="--",
-        linewidth=1.2,
-        label="正常/异常分界",
-    )
-    ax.fill_between(
-        x_axis[:TEST_SPLIT_INDEX],
-        scores[:TEST_SPLIT_INDEX],
-        alpha=0.08,
-        color="#2A9D8F",
-    )
-    ax.fill_between(
-        x_axis[TEST_SPLIT_INDEX - 1 :],
-        scores[TEST_SPLIT_INDEX - 1 :],
-        alpha=0.08,
-        color="#E76F51",
-    )
-    ax.set_xlabel("窗口索引")
-    ax.set_ylabel("分数")
-    ax.set_title(title)
-    ax.grid(alpha=0.2)
-    ax.legend(loc="upper left")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
 
 
 def save_gate_statistics(
@@ -1030,8 +843,8 @@ def main() -> None:
     device = choose_device(args.device)
     loss_weights = LossWeights()
 
-    train_raw, train_mask, feature_names = load_csv_series(args.train_glob)
-    test_raw, test_mask, _ = load_csv_series(args.test_glob)
+    train_raw, train_mask, feature_names = load_csv_glob_with_mask(args.train_glob)
+    test_raw, test_mask, _ = load_csv_glob_with_mask(args.test_glob)
 
     scaler = ObservedStandardScaler().fit(train_raw, train_mask)
     train_scaled = scaler.transform(train_raw, train_mask)
@@ -1202,6 +1015,7 @@ def main() -> None:
     )
     threshold = choose_threshold(
         train_scores=train_scores,
+        method="gaussian_quantile_max",
         std_factor=args.threshold_std_factor,
         quantile=args.threshold_quantile,
     )
@@ -1210,10 +1024,10 @@ def main() -> None:
         threshold_prediction,
         args.min_anomaly_duration,
     )
-    metrics = compute_metrics_from_prediction(
+    metrics = compute_binary_classification_metrics(
         test_labels,
         final_prediction,
-        threshold,
+        threshold=threshold,
     )
 
     prediction_df = pd.DataFrame(
@@ -1252,12 +1066,18 @@ def main() -> None:
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as file:
         json.dump(summary, file, ensure_ascii=False, indent=2)
 
+    configure_chinese_font()
     save_training_curve(history, output_dir / "training_curve.png")
-    plot_anomaly_scores(
+    plot_detection_scores(
         scores=test_scores,
         threshold=threshold,
-        output_path=output_dir / "anomaly_scores.png",
+        split_idx=TEST_SPLIT_INDEX,
+        save_path=output_dir / "anomaly_scores.png",
         title="GCN + 频域门控融合 Transformer 异常检测",
+        style="mra",
+        figsize=(16, 5),
+        dpi=180,
+        threshold_label_fmt="阈值 = {threshold:.4f}",
     )
 
     print(json.dumps(metrics, ensure_ascii=False, indent=2))

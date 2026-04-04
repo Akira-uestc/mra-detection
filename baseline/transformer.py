@@ -1,4 +1,3 @@
-import glob
 import math
 import os
 import random
@@ -8,11 +7,9 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -21,7 +18,23 @@ import matplotlib.pyplot as plt
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
-from window_utils import apply_ewaf_by_segments, build_prompt_test_windows
+from _project_root import PROJECT_ROOT
+from utils.methods.data_loading import load_csv_dir_values
+from utils.methods.display import (
+    compute_binary_classification_metrics,
+    plot_detection_scores,
+    print_metrics,
+)
+from utils.methods.postprocess import (
+    apply_ewaf_by_segments,
+    choose_threshold,
+    infer_segment_lengths,
+    split_index_from_labels,
+)
+from utils.methods.windowing import (
+    build_front_padded_windows,
+    build_prompt_test_windows_values,
+)
 
 
 WINDOW_START_INDEX = 49
@@ -38,75 +51,17 @@ def seed_everything(seed=40):
     torch.cuda.manual_seed_all(seed)
 
 
-def plot_results(scores, threshold, split_idx, save_path):
-    plt.figure(figsize=(6, 5))
-    plt.plot(scores, label="测试异常分数", alpha=0.7)
-    plt.axhline(y=threshold, color="r", linestyle="--", label=f"阈值 ({threshold:.4f})")
-    plt.axvline(x=split_idx, color="g", linestyle=":", label="测试集分界")
-    plt.xlabel("测试样本索引")
-    plt.ylabel("重构误差")
-    plt.title("Transformer异常检测")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.show()
-    plt.savefig(save_path, dpi=150)
-    print(f"\nPlot saved to: {save_path}")
-    plt.close()
-
-
-def load_csv_dir(dir_path, file_pattern="*.csv"):
-    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
-    if not csv_files:
-        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
-
-    dfs = []
-    for csv_file in csv_files:
-        df = pd.read_csv(csv_file, header=None)
-        dfs.append(df)
-        print(f"  Loaded {csv_file}: {len(df)} rows, {df.shape[1]} cols")
-
-    data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
-    return data, data.shape[1]
-
-
-def create_windows(data, seq_len=60, stride=1):
-    n = len(data)
-    if n == 0:
-        return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
-
-    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
-    if stop_idx <= WINDOW_START_INDEX:
-        return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
-
-    windows = []
-    for i in range(WINDOW_START_INDEX, stop_idx, stride):
-        if i < seq_len:
-            pad_len = seq_len - i - 1
-            window_data = np.concatenate(
-                [np.tile(data[0:1], (pad_len, 1)), data[0 : i + 1]],
-                axis=0,
-            )
-        else:
-            window_data = data[i - seq_len + 1 : i + 1]
-        windows.append(window_data)
-
-    return np.stack(windows)
-
-
 def prepare_data(seq_len=60, stride=1):
-    data_dir = Path(__file__).resolve().parent.parent / "data"
+    data_dir = PROJECT_ROOT / "data"
     train_pattern = "train_*.csv"
     test_pattern = "test_*.csv"
 
     print("Loading training data...")
-    train_data, num_features = load_csv_dir(str(data_dir / "train"), train_pattern)
+    train_data, num_features = load_csv_dir_values(str(data_dir / "train"), train_pattern)
     print(f"Training data: {train_data.shape}, num_features={num_features}")
 
     print("\nLoading test data...")
-    test_data, _ = load_csv_dir(str(data_dir / "test"), test_pattern)
+    test_data, _ = load_csv_dir_values(str(data_dir / "test"), test_pattern)
     print(f"Test data: {test_data.shape}")
 
     train_data = np.nan_to_num(train_data, nan=0.0)
@@ -116,8 +71,14 @@ def prepare_data(seq_len=60, stride=1):
     train_data_scaled = scaler.fit_transform(train_data).astype(np.float32)
     test_data_scaled = scaler.transform(test_data).astype(np.float32)
 
-    x_train = create_windows(train_data_scaled, seq_len=seq_len, stride=stride)
-    x_test, test_labels = build_prompt_test_windows(
+    x_train = build_front_padded_windows(
+        train_data_scaled,
+        seq_len=seq_len,
+        stride=stride,
+        start_index=WINDOW_START_INDEX,
+        max_window_count=WINDOW_SAMPLE_COUNT,
+    )
+    x_test, test_labels = build_prompt_test_windows_values(
         test_data_scaled,
         seq_len=seq_len,
         stride=stride,
@@ -232,17 +193,17 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        threshold = train_mean
+        threshold = choose_threshold(train_scores, method="mean")
 
         recon_test = model(x_test_dev)
         test_scores = (recon_test - x_test_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()
         y_true = test_labels
-        split_idx = int(np.sum(y_true == 0))
+        split_idx = split_index_from_labels(y_true)
         if USE_EWAF:
             test_scores = apply_ewaf_by_segments(
                 test_scores,
                 EWAF_ALPHA,
-                [split_idx, len(test_scores) - split_idx],
+                infer_segment_lengths(y_true),
             )
         y_pred = (test_scores > threshold).astype(int)
 
@@ -252,24 +213,22 @@ def train_model():
         print(f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly")
         print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-        acc = accuracy_score(y_true, y_pred)
-        prec = precision_score(y_true, y_pred, zero_division=0)
-        rec = recall_score(y_true, y_pred, zero_division=0)
-        f1 = f1_score(y_true, y_pred, zero_division=0)
-        normal_mask = y_true == 0
-        fault_mask = y_true == 1
-        fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
-        fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
+        metrics = compute_binary_classification_metrics(y_true, y_pred)
+        print_metrics(
+            "\nClassification Metrics:",
+            metrics,
+            order=["accuracy", "precision", "recall", "fdr", "fra", "f1"],
+        )
 
-        print("\nClassification Metrics:")
-        print(f"  Accuracy:  {acc:.4f}")
-        print(f"  Precision: {prec:.4f}")
-        print(f"  Recall:    {rec:.4f}")
-        print(f"  FDR:       {fdr:.4f}")
-        print(f"  FRA:       {fra:.4f}")
-        print(f"  F1-Score:  {f1:.4f}")
-
-        plot_results(test_scores, threshold, split_idx, output_path)
+        plot_detection_scores(
+            test_scores,
+            threshold,
+            split_idx,
+            output_path,
+            title="Transformer异常检测",
+            ylabel="重构误差",
+            show=True,
+        )
 
 
 if __name__ == "__main__":
