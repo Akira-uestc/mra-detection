@@ -12,6 +12,8 @@ import os
 import glob
 from pathlib import Path
 
+from window_utils import build_prompt_test_windows
+
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 WINDOW_START_INDEX = 49
@@ -94,7 +96,7 @@ test_data_norm = scaler.transform(test_data_raw)
 SEQ_LENGTH = 50
 
 X_train = create_sequences(train_data_norm, SEQ_LENGTH, stride=1)
-X_test = create_sequences(test_data_norm, SEQ_LENGTH, stride=1)
+X_test, test_labels = build_prompt_test_windows(test_data_norm, SEQ_LENGTH, stride=1)
 
 # 转为 PyTorch Tensor
 train_tensor = torch.FloatTensor(X_train)
@@ -197,9 +199,7 @@ with torch.no_grad():
         (test_predictions - test_tensor_eval) ** 2, dim=[1, 2]
     ).cpu().numpy()
 
-test_split_idx = min(TEST_SPLIT_INDEX, len(test_loss_dist))
-test_labels = np.zeros(len(test_loss_dist), dtype=int)
-test_labels[test_split_idx:] = 1
+test_split_idx = int(np.sum(test_labels == 0))
 
 # 设定阈值
 threshold = float(np.mean(train_loss_dist))
@@ -216,11 +216,17 @@ acc = accuracy_score(y_true, y_pred)
 prec = precision_score(y_true, y_pred, zero_division=0)
 rec = recall_score(y_true, y_pred, zero_division=0)
 f1 = f1_score(y_true, y_pred, zero_division=0)
+normal_mask = y_true == 0
+fault_mask = y_true == 1
+fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
+fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
 
 print(f"\nClassification Metrics:")
 print(f"  Accuracy:  {acc:.4f}")
 print(f"  Precision: {prec:.4f}")
 print(f"  Recall:    {rec:.4f}")
+print(f"  FDR:       {fdr:.4f}")
+print(f"  FRA:       {fra:.4f}")
 print(f"  F1-Score:  {f1:.4f}")
 
 # 可视化结果

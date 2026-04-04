@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, f
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from window_utils import build_prompt_test_windows
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
@@ -120,15 +121,10 @@ def infer_row_patterns(data: np.ndarray, groups: list[RateGroup]) -> tuple[np.nd
 
     return phi, {pattern: np.asarray(indices, dtype=int) for pattern, indices in pattern_to_indices.items()}
 
-
-def build_test_labels(num_samples: int) -> np.ndarray:
-    labels = np.zeros(num_samples, dtype=int)
-    split_idx = min(TEST_SPLIT_INDEX, num_samples)
-    labels[split_idx:] = 1
-    return labels
-
-
-def prepare_data(seq_len: int = 60, stride: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[RateGroup], int]:
+def prepare_data(
+    seq_len: int = 60,
+    stride: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[RateGroup], int]:
     data_dir = Path(__file__).resolve().parent.parent / "data"
     train_pattern = "train_*.csv"
     test_pattern = "test_*.csv"
@@ -146,10 +142,14 @@ def prepare_data(seq_len: int = 60, stride: int = 1) -> tuple[np.ndarray, np.nda
     test_scaled = transform_observed(test_raw, means, stds)
 
     x_train = create_windows(train_scaled, seq_len=seq_len, stride=stride)
-    x_test = create_windows(test_scaled, seq_len=seq_len, stride=stride)
+    x_test, test_labels = build_prompt_test_windows(
+        test_scaled,
+        seq_len=seq_len,
+        stride=stride,
+    )
     groups = infer_rate_groups(train_scaled)
 
-    return train_scaled, test_scaled, x_train, x_test, groups, train_raw.shape[1]
+    return train_scaled, test_scaled, x_train, x_test, test_labels, groups, train_raw.shape[1]
 
 
 class MultirateFactorAnalysis:
@@ -380,10 +380,14 @@ def spe_control_limit(scores: np.ndarray, alpha: float) -> float:
 
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    normal_mask = y_true == 0
+    fault_mask = y_true == 1
     return {
         "accuracy": accuracy_score(y_true, y_pred),
         "precision": precision_score(y_true, y_pred, zero_division=0),
         "recall": recall_score(y_true, y_pred, zero_division=0),
+        "fdr": float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0,
+        "fra": float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0,
         "f1": f1_score(y_true, y_pred, zero_division=0),
     }
 
@@ -393,6 +397,8 @@ def print_metrics(title: str, metrics: dict[str, float]) -> None:
     print(f"  Accuracy:  {metrics['accuracy']:.4f}")
     print(f"  Precision: {metrics['precision']:.4f}")
     print(f"  Recall:    {metrics['recall']:.4f}")
+    print(f"  FDR:       {metrics['fdr']:.4f}")
+    print(f"  FRA:       {metrics['fra']:.4f}")
     print(f"  F1-Score:  {metrics['f1']:.4f}")
 
 
@@ -446,7 +452,7 @@ def train_model() -> None:
     alpha = 0.99
     max_iter = 80
 
-    train_data, test_data, x_train, x_test, groups, num_features = prepare_data(
+    train_data, test_data, x_train, x_test, test_labels, groups, num_features = prepare_data(
         seq_len=seq_len,
         stride=stride,
     )
@@ -479,8 +485,8 @@ def train_model() -> None:
     test_scores = score_window_dataset(model, x_test, t2_limit, spe_limits)
     threshold = float(np.mean(train_scores))
 
-    split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
-    y_true = build_test_labels(len(test_scores))
+    y_true = test_labels
+    split_idx = int(np.sum(y_true == 0))
     y_pred = (test_scores > threshold).astype(int)
 
     print("\n--- 异常检测评估结果 ---")
@@ -491,11 +497,8 @@ def train_model() -> None:
     print(f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly")
     print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-    print("\nClassification Metrics:")
-    print(f"  Accuracy:  {accuracy_score(y_true, y_pred):.4f}")
-    print(f"  Precision: {precision_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"  Recall:    {recall_score(y_true, y_pred, zero_division=0):.4f}")
-    print(f"  F1-Score:  {f1_score(y_true, y_pred, zero_division=0):.4f}")
+    metrics = evaluate_predictions(y_true, y_pred)
+    print_metrics("\nClassification Metrics:", metrics)
 
     plot_results(
         scores=test_scores,

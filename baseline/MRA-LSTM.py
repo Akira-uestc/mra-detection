@@ -16,6 +16,7 @@ import warnings
 import os
 import glob
 from pathlib import Path
+from window_utils import TEST_SEGMENT_LENGTH, TEST_WINDOW_COUNT
 warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -27,11 +28,9 @@ TEST_SPLIT_INDEX = 2000
 class SequenceDataset(Dataset):
     """Dataset for multirate data.
 
-    Uses front-padding sliding window (following mra.py methodology):
-    - For each data point i, the input window covers [i - seq_len + 1, i].
-    - When i < seq_len, the window is front-padded by repeating the first sample.
-    - This produces exactly one window per data point (stride=1), so every
-      sample gets a corresponding anomaly score.
+    Training uses front-padding sliding windows.
+    Testing follows mra.py and builds windows within the normal/fault segments
+    independently, so fault windows do not cross the test split.
     """
     def __init__(self, data, sequence_length=30,
                  prediction_horizon=1, stride=1, training=True):
@@ -41,45 +40,67 @@ class SequenceDataset(Dataset):
 
         values = data.astype(np.float32)
         n = len(values)
-        stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
-
-        # Build windows with front-padding (mra.py style)
         self.x_windows = []
         self.y_windows = []
         self.labels = []
 
-        for window_idx, i in enumerate(range(WINDOW_START_INDEX, stop_idx, stride)):
-            # --- input window (length = sequence_length) ---
-            if i < sequence_length:
-                pad_len = sequence_length - i - 1
-                window = np.concatenate([
-                    np.tile(values[0:1], (pad_len, 1)),
-                    values[0:i + 1]
-                ], axis=0)
-            else:
-                window = values[i - sequence_length + 1:i + 1]
+        if training:
+            stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
 
-            # --- target window (length = prediction_horizon) ---
-            y_start = i + 1
-            y_end = y_start + prediction_horizon
-            if y_end <= n:
-                target = values[y_start:y_end]
-            else:
-                available = values[y_start:n] if y_start < n else values[-1:]
-                pad_needed = prediction_horizon - len(available)
-                target = np.concatenate([
-                    available,
-                    np.tile(values[-1:], (pad_needed, 1))
-                ], axis=0)
+            for i in range(WINDOW_START_INDEX, stop_idx, stride):
+                if i < sequence_length:
+                    pad_len = sequence_length - i - 1
+                    window = np.concatenate([
+                        np.tile(values[0:1], (pad_len, 1)),
+                        values[0:i + 1]
+                    ], axis=0)
+                else:
+                    window = values[i - sequence_length + 1:i + 1]
 
-            self.x_windows.append(window)
-            self.y_windows.append(target)
+                y_start = i + 1
+                y_end = y_start + prediction_horizon
+                if y_end <= n:
+                    target = values[y_start:y_end]
+                else:
+                    available = values[y_start:n] if y_start < n else values[-1:]
+                    pad_needed = prediction_horizon - len(available)
+                    target = np.concatenate([
+                        available,
+                        np.tile(values[-1:], (pad_needed, 1))
+                    ], axis=0)
 
-            # Test data uses a fixed 2000/2000 split after the reserved warmup rows.
-            if training:
+                self.x_windows.append(window)
+                self.y_windows.append(target)
                 self.labels.append(0)
-            else:
-                self.labels.append(0 if window_idx < TEST_SPLIT_INDEX else 1)
+        else:
+            stop_idx = min(TEST_SEGMENT_LENGTH, sequence_length + TEST_WINDOW_COUNT)
+
+            for segment_start, label in ((0, 0), (TEST_SEGMENT_LENGTH, 1)):
+                segment_values = values[segment_start : segment_start + TEST_SEGMENT_LENGTH]
+                if len(segment_values) < sequence_length:
+                    continue
+
+                for end_idx in range(sequence_length, stop_idx, stride):
+                    if end_idx > len(segment_values):
+                        break
+
+                    window = segment_values[end_idx - sequence_length : end_idx]
+                    global_end_idx = segment_start + end_idx - 1
+                    y_start = global_end_idx + 1
+                    y_end = y_start + prediction_horizon
+                    if y_end <= n:
+                        target = values[y_start:y_end]
+                    else:
+                        available = values[y_start:n] if y_start < n else values[-1:]
+                        pad_needed = prediction_horizon - len(available)
+                        target = np.concatenate([
+                            available,
+                            np.tile(values[-1:], (pad_needed, 1))
+                        ], axis=0)
+
+                    self.x_windows.append(window)
+                    self.y_windows.append(target)
+                    self.labels.append(label)
 
     def __len__(self):
         return len(self.x_windows)
@@ -574,20 +595,23 @@ def evaluate_detection(errors, labels, threshold):
     recall = TP / (TP + FN + 1e-10)
     f1 = 2 * precision * recall / (precision + recall + 1e-10)
     specificity = TN / (TN + FP + 1e-10)
+    fra = FP / (FP + TN + 1e-10)
+    fdr = TP / (TP + FN + 1e-10)
 
     return {
         'accuracy': accuracy,
         'precision': precision,
         'recall': recall,
+        'fdr': fdr,
+        'fra': fra,
         'f1': f1,
         'specificity': specificity,
         'TP': TP, 'TN': TN, 'FP': FP, 'FN': FN
     }
 
 
-def plot_anomaly_detection(errors, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
+def plot_anomaly_detection(errors, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
-    split_idx = min(TEST_SPLIT_INDEX, len(errors))
     plt.figure(figsize=(6, 5))
     plt.plot(errors, label='测试异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
@@ -689,7 +713,7 @@ def main():
     print("\nComputing test anomaly scores...")
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
     print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
-    split_idx = min(TEST_SPLIT_INDEX, len(test_errors))
+    split_idx = int(np.sum(labels == 0))
 
     # Evaluate detection using training-based threshold
     metrics = evaluate_detection(test_errors, labels, threshold_train)
@@ -697,6 +721,8 @@ def main():
     print(f"  Accuracy:  {metrics['accuracy']:.4f}")
     print(f"  Precision: {metrics['precision']:.4f}")
     print(f"  Recall:    {metrics['recall']:.4f}")
+    print(f"  FDR:       {metrics['fdr']:.4f}")
+    print(f"  FRA:       {metrics['fra']:.4f}")
     print(f"  F1-Score:  {metrics['f1']:.4f}")
     print(f"  Specificity: {metrics['specificity']:.4f}")
     print(f"  TP: {metrics['TP']}, TN: {metrics['TN']}, FP: {metrics['FP']}, FN: {metrics['FN']}")
@@ -704,7 +730,7 @@ def main():
 
     # Plot anomaly detection results
     print("\nPlotting anomaly detection results...")
-    plot_anomaly_detection(test_errors, threshold_train)
+    plot_anomaly_detection(test_errors, threshold_train, split_idx)
 
     # Save model
     torch.save(model.state_dict(), 'mra_lstm_model.pth')

@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import os
 import glob
 
+from window_utils import build_prompt_test_windows
+
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 WINDOW_START_INDEX = 49
@@ -102,7 +104,11 @@ def prepare_data(seq_len=60, stride=1):
 
     # 4. 生成滑窗
     X_train = create_windows(train_data_scaled, seq_len=seq_len, stride=stride)
-    X_test = create_windows(test_data_scaled, seq_len=seq_len, stride=stride)
+    X_test, test_labels = build_prompt_test_windows(
+        test_data_scaled,
+        seq_len=seq_len,
+        stride=stride,
+    )
 
     # 5. 重塑数据以适应 1D-CNN: (Batch_Size, Channels, Length)
     X_train = np.transpose(X_train, (0, 2, 1))  # (N, num_features, seq_len)
@@ -112,7 +118,7 @@ def prepare_data(seq_len=60, stride=1):
     X_train_tensor = torch.FloatTensor(X_train)
     X_test_tensor = torch.FloatTensor(X_test)
 
-    return X_train_tensor, X_test_tensor, num_features
+    return X_train_tensor, X_test_tensor, test_labels, num_features
 
 # ---------------------------------------------------------
 # 2. 定义 1D-CNN 模型
@@ -165,7 +171,10 @@ def train_model():
     # 准备数据
     SEQ_LEN = 60
     STRIDE = 1
-    X_train, X_test, num_features = prepare_data(seq_len=SEQ_LEN, stride=STRIDE)
+    X_train, X_test, test_labels, num_features = prepare_data(
+        seq_len=SEQ_LEN,
+        stride=STRIDE,
+    )
     
     # 创建 DataLoader
     train_dataset = TensorDataset(X_train, X_train)
@@ -178,7 +187,7 @@ def train_model():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练循环
-    epochs = 10
+    epochs = 1
     print(f"开始训练，共 {epochs} 个 Epoch...")
     
     for epoch in range(epochs):
@@ -213,9 +222,8 @@ def train_model():
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
-        split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
-        y_true = np.zeros(len(test_scores), dtype=int)
-        y_true[split_idx:] = 1
+        y_true = test_labels
+        split_idx = int(np.sum(y_true == 0))
         y_pred = (test_scores > threshold).astype(int)
 
         print(f"Device: {device}")
@@ -228,11 +236,17 @@ def train_model():
         prec = precision_score(y_true, y_pred, zero_division=0)
         rec = recall_score(y_true, y_pred, zero_division=0)
         f1 = f1_score(y_true, y_pred, zero_division=0)
+        normal_mask = y_true == 0
+        fault_mask = y_true == 1
+        fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
+        fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
 
         print(f"\nClassification Metrics:")
         print(f"  Accuracy:  {acc:.4f}")
         print(f"  Precision: {prec:.4f}")
         print(f"  Recall:    {rec:.4f}")
+        print(f"  FDR:       {fdr:.4f}")
+        print(f"  FRA:       {fra:.4f}")
         print(f"  F1-Score:  {f1:.4f}")
 
         plot_results(test_scores, threshold, split_idx)

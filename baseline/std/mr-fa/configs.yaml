@@ -1,0 +1,28 @@
+device: cpu
+
+# dataset
+dataset: IGBT
+train_path: train-Sta-Vin80_Vout50-R40_50_60.csv
+test_path: test-Sta-Vin80_Vout50-R40_50_60-Fault_C_R5.csv
+val_path: val-Sta-Vin80_Vout50-R40_50_60.csv
+scaler_type: min_max
+scaler_path: scaler.joblib
+
+input_slice: [0, 24]
+target_slice: [0, 24]
+horizon: null
+start: 100
+end: 4100
+boundary: 2000
+
+# model
+batch_size: 50
+seq_len: 40
+d_factor: 12
+
+# train
+lr: 1.0e-4
+lr_gamma: 0.8
+weight_decay: 1.0e-6
+epochs: 12
+min_delta: 1.0e-5

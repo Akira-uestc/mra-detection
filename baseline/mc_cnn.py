@@ -36,6 +36,8 @@ import torch.optim as optim
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader, TensorDataset
 
+from window_utils import build_prompt_test_windows_with_mask
+
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
@@ -188,6 +190,7 @@ class PreparedData:
     train_loader: DataLoader
     train_eval_loader: DataLoader
     test_loader: DataLoader
+    test_labels: np.ndarray
     process_cols: np.ndarray
     quality_cols: np.ndarray
     num_process_features: int
@@ -241,13 +244,13 @@ def prepare_data(
     dx_train, _ = create_windows(
         x_train, x_train_mask, seq_len=num_channels, stride=stride
     )
-    dx_test, _ = create_windows(
+    dx_test, _, test_labels = build_prompt_test_windows_with_mask(
         x_test, x_test_mask, seq_len=num_channels, stride=stride
     )
     dy_train, dy_train_mask = create_windows(
         y_train, y_train_mask, seq_len=num_channels, stride=stride
     )
-    dy_test, dy_test_mask = create_windows(
+    dy_test, dy_test_mask, _ = build_prompt_test_windows_with_mask(
         y_test, y_test_mask, seq_len=num_channels, stride=stride
     )
 
@@ -279,6 +282,7 @@ def prepare_data(
         train_loader=train_loader,
         train_eval_loader=train_eval_loader,
         test_loader=test_loader,
+        test_labels=test_labels,
         process_cols=process_cols,
         quality_cols=quality_cols,
         num_process_features=len(process_cols),
@@ -519,14 +523,6 @@ def score_dataset(
 
     return np.asarray(scores, dtype=np.float32)
 
-
-def build_test_labels(num_samples: int) -> np.ndarray:
-    labels = np.zeros(num_samples, dtype=int)
-    split_idx = min(TEST_SPLIT_INDEX, num_samples)
-    labels[split_idx:] = 1
-    return labels
-
-
 def train_model() -> None:
     seed_everything(42)
 
@@ -575,9 +571,13 @@ def train_model() -> None:
     test_scores = score_dataset(model, data.test_loader, device)
     threshold = float(np.mean(train_scores))
 
-    split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
-    y_true = build_test_labels(len(test_scores))
+    y_true = data.test_labels
+    split_idx = int(np.sum(y_true == 0))
     y_pred = (test_scores > threshold).astype(int)
+    normal_mask = y_true == 0
+    fault_mask = y_true == 1
+    fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
+    fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
 
     print("\n--- Anomaly detection evaluation ---")
     print(
@@ -593,6 +593,8 @@ def train_model() -> None:
     print(f"  Accuracy:  {accuracy_score(y_true, y_pred):.4f}")
     print(f"  Precision: {precision_score(y_true, y_pred, zero_division=0):.4f}")
     print(f"  Recall:    {recall_score(y_true, y_pred, zero_division=0):.4f}")
+    print(f"  FDR:       {fdr:.4f}")
+    print(f"  FRA:       {fra:.4f}")
     print(f"  F1-Score:  {f1_score(y_true, y_pred, zero_division=0):.4f}")
 
     plot_results(

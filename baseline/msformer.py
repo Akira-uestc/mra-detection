@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 from model.mstransformer import MSTransformer
+from window_utils import build_prompt_test_windows_with_mask
 
 import random
 
@@ -183,14 +184,6 @@ def score_dataset(model, windows, masks, device, sampling_rate, batch_size=32):
 
     return np.array(scores)
 
-
-def build_test_labels(num_scores):
-    labels = np.zeros(num_scores, dtype=int)
-    split_idx = min(TEST_SPLIT_INDEX, num_scores)
-    labels[split_idx:] = 1
-    return labels
-
-
 # ==========================================
 # 2. 核心检测与绘图逻辑
 # ==========================================
@@ -229,7 +222,12 @@ def run_full_detection():
 
     # --- C. 创建滑动窗口 ---
     X_train, M_train = create_windows(train_scaled, train_mask, seq_len=window_size, stride=1)
-    X_test, M_test = create_windows(test_scaled, test_mask, seq_len=window_size, stride=1)
+    X_test, M_test, test_labels = build_prompt_test_windows_with_mask(
+        test_scaled,
+        test_mask,
+        seq_len=window_size,
+        stride=1,
+    )
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X_train), torch.tensor(M_train)),
         batch_size=batch_size,
@@ -278,8 +276,7 @@ def run_full_detection():
 
     # --- F. 计算测试集异常分数 ---
     test_scores_arr = score_dataset(model, X_test, M_test, device=device, sampling_rate=s_rate, batch_size=batch_size)
-    test_labels = build_test_labels(len(test_scores_arr))
-    split_idx = min(TEST_SPLIT_INDEX, len(test_scores_arr))
+    split_idx = int(np.sum(test_labels == 0))
 
     print(f"\nAnomaly Detection Results:")
     print(f"  Mean Score: {np.mean(test_scores_arr):.6f}")
@@ -296,11 +293,17 @@ def run_full_detection():
     prec = precision_score(y_true, y_pred, zero_division=0)
     rec = recall_score(y_true, y_pred, zero_division=0)
     f1 = f1_score(y_true, y_pred, zero_division=0)
+    normal_mask = y_true == 0
+    fault_mask = y_true == 1
+    fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
+    fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
 
     print(f"\nClassification Metrics:")
     print(f"  Accuracy:  {acc:.4f}")
     print(f"  Precision: {prec:.4f}")
     print(f"  Recall:    {rec:.4f}")
+    print(f"  FDR:       {fdr:.4f}")
+    print(f"  FRA:       {fra:.4f}")
     print(f"  F1-Score:  {f1:.4f}")
 
     # --- G. 结果可视化 ---

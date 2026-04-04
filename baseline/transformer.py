@@ -21,6 +21,8 @@ import matplotlib.pyplot as plt
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
+from window_utils import build_prompt_test_windows
+
 
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
@@ -47,6 +49,7 @@ def plot_results(scores, threshold, split_idx, save_path):
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
+    plt.show()
     plt.savefig(save_path, dpi=150)
     print(f"\nPlot saved to: {save_path}")
     plt.close()
@@ -112,9 +115,13 @@ def prepare_data(seq_len=60, stride=1):
     test_data_scaled = scaler.transform(test_data).astype(np.float32)
 
     x_train = create_windows(train_data_scaled, seq_len=seq_len, stride=stride)
-    x_test = create_windows(test_data_scaled, seq_len=seq_len, stride=stride)
+    x_test, test_labels = build_prompt_test_windows(
+        test_data_scaled,
+        seq_len=seq_len,
+        stride=stride,
+    )
 
-    return torch.FloatTensor(x_train), torch.FloatTensor(x_test), num_features
+    return torch.FloatTensor(x_train), torch.FloatTensor(x_test), test_labels, num_features
 
 
 class PositionalEncoding(nn.Module):
@@ -179,7 +186,10 @@ def train_model():
     epochs = 10
     output_path = Path(__file__).resolve().parent.parent / "outputs" / "transformer_detection.png"
 
-    x_train, x_test, num_features = prepare_data(seq_len=seq_len, stride=stride)
+    x_train, x_test, test_labels, num_features = prepare_data(
+        seq_len=seq_len,
+        stride=stride,
+    )
     train_loader = DataLoader(TensorDataset(x_train, x_train), batch_size=batch_size, shuffle=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -222,9 +232,8 @@ def train_model():
 
         recon_test = model(x_test_dev)
         test_scores = (recon_test - x_test_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()
-        split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
-        y_true = np.zeros(len(test_scores), dtype=int)
-        y_true[split_idx:] = 1
+        y_true = test_labels
+        split_idx = int(np.sum(y_true == 0))
         y_pred = (test_scores > threshold).astype(int)
 
         print(f"Device: {device}")
@@ -237,11 +246,17 @@ def train_model():
         prec = precision_score(y_true, y_pred, zero_division=0)
         rec = recall_score(y_true, y_pred, zero_division=0)
         f1 = f1_score(y_true, y_pred, zero_division=0)
+        normal_mask = y_true == 0
+        fault_mask = y_true == 1
+        fra = float(np.mean(y_pred[normal_mask] == 1)) if np.any(normal_mask) else 0.0
+        fdr = float(np.mean(y_pred[fault_mask] == 1)) if np.any(fault_mask) else 0.0
 
         print("\nClassification Metrics:")
         print(f"  Accuracy:  {acc:.4f}")
         print(f"  Precision: {prec:.4f}")
         print(f"  Recall:    {rec:.4f}")
+        print(f"  FDR:       {fdr:.4f}")
+        print(f"  FRA:       {fra:.4f}")
         print(f"  F1-Score:  {f1:.4f}")
 
         plot_results(test_scores, threshold, split_idx, output_path)
