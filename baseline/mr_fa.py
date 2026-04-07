@@ -153,29 +153,34 @@ class MultirateFactorAnalysis:
         self.groups: list[RateGroup] = []
         self.loadings_: list[np.ndarray] = []
         self.noise_vars_: list[np.ndarray] = []
+        self.train_loss_history_: list[float] = []
         self.loglik_history_: list[float] = []
 
     def fit(self, data: np.ndarray, groups: list[RateGroup]) -> "MultirateFactorAnalysis":
+        train_rows = self._prepare_training_rows(data)
         self.groups = groups
-        self._initialize_parameters(data)
+        self._initialize_parameters(train_rows)
+        self.train_loss_history_.clear()
+        self.loglik_history_.clear()
 
-        prev_loglik = -np.inf
+        prev_loss = np.inf
         for iteration in range(1, self.max_iter + 1):
-            posterior = self._posterior(data)
-            self._m_step(data, posterior["means"], posterior["second_moments"])
+            posterior = self._posterior(train_rows)
+            reconstruction = self._reconstruct_from_means(posterior["means"])
+            train_loss = self._masked_mse(train_rows, reconstruction)
+            self.train_loss_history_.append(train_loss)
+            self._m_step(train_rows, posterior["means"], posterior["second_moments"])
 
-            loglik = float(np.sum(self.score_samples(data)))
-            self.loglik_history_.append(loglik)
-            improvement = loglik - prev_loglik
+            improvement = prev_loss - train_loss
             print(
                 f"    EM iter {iteration:03d}/{self.max_iter}"
-                f"  loglik={loglik:.4f}  delta={improvement:.6f}"
+                f"  train_loss={train_loss:.8f}  delta={improvement:.8f}"
             )
 
-            if iteration > 1 and abs(improvement) < self.tol * max(1.0, abs(prev_loglik)):
+            if iteration > 1 and abs(improvement) < self.tol * max(1.0, abs(prev_loss)):
                 break
 
-            prev_loglik = loglik
+            prev_loss = train_loss
 
         return self
 
@@ -235,39 +240,24 @@ class MultirateFactorAnalysis:
             "phi": phi,
         }
 
+    def _prepare_training_rows(self, data: np.ndarray) -> np.ndarray:
+        if data.ndim == 2:
+            return data
+        if data.ndim == 3:
+            num_rows = data.shape[0] * data.shape[1]
+            return data.reshape(num_rows, data.shape[2])
+        raise ValueError(f"Unsupported training data ndim={data.ndim}, expected 2 or 3.")
+
     def _initialize_parameters(self, data: np.ndarray) -> None:
         rng = np.random.default_rng(self.random_state)
-        filled = np.nan_to_num(data, nan=0.0)
-
-        u, s, _ = np.linalg.svd(filled, full_matrices=False)
-        rank = min(self.n_factors, s.shape[0])
-        latent = u[:, :rank] * s[:rank]
-        if rank < self.n_factors:
-            extra = rng.normal(scale=0.05, size=(data.shape[0], self.n_factors - rank))
-            latent = np.hstack([latent, extra])
-
-        latent -= latent.mean(axis=0, keepdims=True)
-        cov = np.atleast_2d(np.cov(latent, rowvar=False, bias=True))
-        cov += np.eye(cov.shape[0]) * self.min_noise
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        whitening = eigvecs @ np.diag(1.0 / np.sqrt(np.clip(eigvals, self.min_noise, None))) @ eigvecs.T
-        latent = latent @ whitening
 
         self.loadings_ = []
         self.noise_vars_ = []
-        eye = np.eye(self.n_factors) * self.min_noise
 
         for group in self.groups:
-            obs_idx = np.flatnonzero(group.train_mask)
-            x_group = data[np.ix_(obs_idx, group.columns)]
-            latent_obs = latent[obs_idx]
-            sum_tt = latent_obs.T @ latent_obs + eye
-            loading = x_group.T @ latent_obs @ np.linalg.inv(sum_tt)
-            residual = x_group - latent_obs @ loading.T
-            noise_var = np.var(residual, axis=0)
-            noise_var = np.clip(noise_var, self.min_noise, None)
-            self.loadings_.append(loading)
-            self.noise_vars_.append(noise_var)
+            d_group = len(group.columns)
+            self.loadings_.append(rng.normal(size=(d_group, self.n_factors)))
+            self.noise_vars_.append(np.ones(d_group, dtype=np.float64))
 
     def _posterior(self, data: np.ndarray) -> dict[str, np.ndarray]:
         num_rows = data.shape[0]
@@ -314,7 +304,9 @@ class MultirateFactorAnalysis:
         eye = np.eye(self.n_factors) * self.min_noise
 
         for group_idx, group in enumerate(self.groups):
-            obs_idx = np.flatnonzero(group.train_mask)
+            obs_idx = self._observed_row_indices(data, group)
+            if len(obs_idx) == 0:
+                continue
             x_group = data[np.ix_(obs_idx, group.columns)]
             mean_group = means[obs_idx]
             second_sum = np.sum(second_moments[obs_idx], axis=0) + eye
@@ -334,6 +326,24 @@ class MultirateFactorAnalysis:
         block_noise = np.concatenate([self.noise_vars_[group_idx] for group_idx in observed_groups])
         covariance = block_loadings @ block_loadings.T + np.diag(block_noise)
         return covariance
+
+    def _observed_row_indices(self, data: np.ndarray, group: RateGroup) -> np.ndarray:
+        return np.flatnonzero(~np.isnan(data[:, group.columns[0]]))
+
+    def _reconstruct_from_means(self, means: np.ndarray) -> np.ndarray:
+        num_rows = means.shape[0]
+        num_features = sum(len(group.columns) for group in self.groups)
+        reconstruction = np.zeros((num_rows, num_features), dtype=np.float64)
+        for group_idx, group in enumerate(self.groups):
+            reconstruction[:, group.columns] = means @ self.loadings_[group_idx].T
+        return reconstruction
+
+    def _masked_mse(self, data: np.ndarray, reconstruction: np.ndarray) -> float:
+        observed = ~np.isnan(data)
+        if not np.any(observed):
+            return 0.0
+        residual = np.nan_to_num(data, nan=0.0) - reconstruction
+        return float(np.mean(np.square(residual[observed])))
 
     def _stack_observed_rows(self, data: np.ndarray, observed_groups: list[int]) -> np.ndarray:
         blocks = [data[:, self.groups[group_idx].columns] for group_idx in observed_groups]
@@ -407,7 +417,11 @@ def train_model() -> None:
         tol=1e-5,
         random_state=42,
     )
-    model.fit(train_data, groups)
+    print(
+        f"Using standard-style training samples: windows={x_train.shape[0]}, "
+        f"seq_len={x_train.shape[1]}, flattened_rows={x_train.shape[0] * x_train.shape[1]}"
+    )
+    model.fit(x_train, groups)
 
     train_monitor = model.monitor(train_data)
     t2_limit = t2_control_limit(latent_dim, train_data.shape[0], alpha)

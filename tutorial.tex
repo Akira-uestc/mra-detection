@@ -1,0 +1,1000 @@
+\documentclass[bachelor, vlined]{DissertUESTC}
+
+\begin{document}
+	
+	% 以下两条命令为高亮示例文档中的关键内容而设，正式撰写时切不可使用
+	% \newcommand{\shad}[1]{\textcolor{DodgerBlue}{\ttfamily #1}}
+	% \newcommand{\shadcmd}[1]{\shad{$\backslash$#1}}
+
+
+	% 下方命令允许跨页排版包含多个行间公式的公式组，可选参数可取值为1,2,3,4，越大表示跨页倾向越高
+	% \allowdisplaybreaks[3]
+
+
+	% 当论文中某节的内容接近填满页面且其下紧随几项标题时，LaTeX更倾向于在后续的标题前分页，并且纵向拉伸当前页内容的段间距，以实现纵向分散对齐，也就是很多人在问的现象。这并不是模板bug，而是LaTeX特性。
+	% 出现这种情况的本质原因是用户的内容，尤其是在页面中有些图、表、标题的时候，它们的高度很可能不是正文行距的整数倍，那必然就会出现这种问题。
+	% 如果你觉得Word从上到下直接堆叠内容，然后在页尾留下明显空白的处理方式更合你意，那就使用下方的\raggedbottom命令
+	% \raggedbottom  % 此命令可让LaTeX像Word那样直接堆叠页面内容，而不再默认拉伸段间距，代价是页尾可能会有明显空白
+	
+
+	% \setconfidential命令用于设置论文封面中的“密级信息”。慎用！！！学生个人不应随意将论文定性为涉密，需要先经过审批。此命令必须先于\uestccover使用才有效
+	% 命令参数：\setconfidential(<信息右上角与纸张左、上边界的距离，以逗号分隔>)[<字体格式>]{<密级>}{<保密期限>}。可选参数默认值：(18cm,2cm)[\zihao{4}\bfseries]
+	% \setconfidential{密级}{保密期限}  % 非涉密论文一定要注释掉该命令
+
+	% 封面示例————“双学位学士”以外的学位论文
+%	\uestccover[<学院名称排版风格>]{<论文题目>}{<学科专业>}{<学号>}{<作者姓名>}{<指导教师>}{<教师职称>}{<学院>} % 单学位学士、研究生通用
+	\uestccover{基于数据插补的电源系统多采样率过程异常检测方法研究}
+	{自动化}
+	{2022060908009}
+	{刘俊}
+	{邱根}
+	{高级工程师}
+	{自动化工程学院}  % 空封面
+
+	% 独创性声明：[<签名宽度>]{<日期>}{<作者签名图片1>}[<作者签名图片2 默认值为作者签名图片1>]{<导师签名图片>}，仅研究生用
+	\declaration{}{}{}  % 空白独创性声明
+	
+	
+	% 开启中文摘要
+	\zhabstract
+	
+	电源系统作为现代工业的关键环节，其安全稳定运行至关重要 。在实际运行中，受传感器与变量动态特性差异影响，电源系统监测数据普遍呈现多采样率特征，导致严重的数据缺失问题 。现有的大多方法通过简单插值或直接忽略缺失值，难以有效刻画变量间复杂的物理耦合与周期性时频特征，从而限制了异常检测的性能 。针对上述问题，本文提出了一种基于数据插补的自适应图–频率融合异常检测网络（AGF-ADNet） 。首先，设计了自适应图学习模块，在无需先验物理拓扑的条件下自动挖掘变量间的隐式关联 。其次，构建了时频协同插补掩码模块：时域分支结合图卷积网络（GCN）与多尺度时序卷积网络（TCN）提取时空动态特征；频域分支引入快速傅里叶变换（FFT）与注意力机制以增强周期性与谐波特征 ；并通过门控融合模块实现双域信息的自适应协同 。最后，基于重构误差机制，利用 Transformer 重构器进行全局时序建模并完成端到端异常检测 。基于逆变器系统实验平台数据集的实验结果表明，AGF-ADNet 的准确率达到 93.78\%，F1-Score 达到 94.02\%，显著优于传统的 LSTM 模型与现有的多采样率网络（如 MRA-LSTM、Multirate-Former） 。这证明了本文方法在多采样率电源系统异常检测中的有效性与优越性。
+
+	% 中文关键字
+	\zhkeywords{异常检测，多采样率过程，数据插补，图卷积网络，频域注意力，电源系统}
+	
+	% 开启英文摘要
+	\enabstract
+	The safe and stable operation of power systems, regarded as the crucial aspect of modern industry, is of paramount importance. In practical operations, due to the differences in sensors and the dynamic characteristics of variables, monitoring data in power systems generally exhibit multi-rate sampling characteristics, leading to severe missing data problems. Most existing methods rely on simple interpolation or directly ignore missing values, making it difficult to effectively characterize the complex physical coupling and periodic time-frequency features among variables, thereby limiting anomaly detection performance. To address these issues, this paper proposes an Adaptive Graph-Frequency Anomaly Detection Network (AGF-ADNet) based on data imputation. Firstly, an adaptive graph learning module is designed to automatically mine implicit associations between variables without prior physical topology. Secondly, a time-frequency collaborative masked imputation module is constructed: the time-domain branch combines Graph Convolutional Networks (GCN) and Multi-Scale Temporal Convolutional Networks (TCN) to extract spatio-temporal dynamic features, while the frequency-domain branch introduces Fast Fourier Transform (FFT) and attention mechanisms to enhance periodic and harmonic features. A gated mechanism is then used to achieve the adaptive fusion of dual-domain information. Finally, based on the reconstruction error mechanism, a Transformer reconstructor is utilized for global temporal modeling to complete end-to-end anomaly detection. Experimental results based on the inverter system experimental platform dataset show that AGF-ADNet achieves an accuracy of 93.78\% and an F1-Score of 94.02\%, significantly outperforming traditional LSTM models and existing multi-rate networks such as MRA-LSTM and Multirate-Former. This proves the effectiveness and superiority of the proposed method in anomaly detection of multi-rate power systems.
+	
+	% 英文关键字
+	\enkeywords{Anomaly Detection, Multi-rate Process, Data Imputation, Graph Convolutional Network, Frequency-domain Attention, Power System}
+
+	
+	\tableofcontents  % 主目录，必要
+	
+	% \listoffigures  % 图多则放，反之不放
+	
+	% \listoftables  % 表多则放，反之不放
+	
+	% \listofsymbs  % 生成主要符号表标题，需要额外维护符号表内容
+	
+	\chapter{绪论}
+
+	\section{电源系统异常检测研究背景与意义}
+
+    随着工业4.0、智能制造和工业互联网的持续推进，现代工业系统正朝着大型化、复杂化、智能化方向快速发展。电源系统、逆变器系统以及典型流程工业装置中集成了大量传感器、执行器与控制单元，系统内部同时存在电磁、热力、机械和控制等多重耦合关系，运行过程具有显著的动态性、非线性和不确定性。一旦关键设备退化、控制偏差累积或外部工况突变未能被及时识别，就可能诱发局部失稳、连锁故障甚至停机事故，进而造成设备损坏、产品质量下降和严重的经济损失。因此，面向复杂工业过程开展高可靠异常检测研究，具有重要的理论价值和工程意义。
+
+    在电源系统及其相关工业场景中，异常往往表现为电压、电流、功率、温度等多类变量的协同变化。与一般静态监测任务不同，这类系统中的异常既可能体现为瞬态尖峰、缓慢漂移，也可能表现为谐波畸变、频率偏移和波形失真等复杂模式，单纯依靠人工巡检或固定阈值规则已难以满足实时监测和早期预警需求。近年来，数据驱动方法依托工业现场不断积累的运行数据，为异常检测提供了新的研究路径。通过挖掘多变量时间序列中的潜在演化规律与变量关联结构，可以在缺乏完备机理模型的条件下实现对设备健康状态和过程异常的有效识别。
+    
+    然而，真实工业数据通常并非理想的单采样率序列。随着传感器技术的快速发展，大型系统中通常会存在多类型传感器网络,可以同时检测量纲不同、数值差异较大的各类状态参量。受传感器成本、测量原理、通信带宽以及变量动态特性差异等因素影响，不同变量常以不同频率采集。例如，电流、电压等电气量往往以较高频率采样，而温度、状态量或质量指标则通常以较低频率更新。将这些数据统一到同一时间轴后，会产生大量规则性缺失值和时间异步现象，形成典型的多采样率时间序列。多采样率特性不仅削弱了数据完整性，也显著增加了建模难度：如果直接套用单采样率异常检测方法，往往难以充分利用低频变量信息，甚至会因缺失值传播、插补失真和时序错位而降低检测精度。
+    
+    基于上述背景，围绕多采样率工业过程数据开展异常检测研究，特别是探索数据插补与异常检测协同优化的建模思路，具有双重意义。从理论层面看，该研究有助于深化对多采样率时间序列表示、缺失信息恢复和异常模式判别机制的认识，丰富工业过程监测与智能诊断的研究体系。从工程层面看，通过软件建模手段提升对低频变量和隐性异常的感知能力，可在一定程度上降低对高成本高频传感器的依赖，为电源系统及相关工业场景的安全运行、故障预警和运维决策提供支持。
+
+	\section{异常检测方法研究进展}
+
+	\subsection{传统统计与机器学习方法}
+
+    异常检测早期研究主要基于统计学建模、距离与密度度量、聚类分析以及支持向量机等传统方法。统计学方法通过假设数据服从某类分布并设置判别阈值实现异常识别，具有实现简单、计算开销较低等优点；距离、密度和聚类类方法则通过样本间相似性关系识别离群行为；单类支持向量机等判别式方法在缺乏异常样本时也具有一定应用价值。这类方法在结构较简单、维度较低和分布相对稳定的场景中取得了较好效果。
+
+    但对于复杂工业过程而言，传统方法的局限性也较为明显。首先，多数方法依赖显式分布假设或人工设计特征，其性能高度依赖于先验分布假设，当系统呈现强非线性、强耦合和时变特性时，模型鲁棒性往往不足。其次，在高维多变量场景下，距离和密度的判别能力会受到较大影响，聚类效果对参数和特征选择也较为敏感。再次，传统方法通常难以刻画长时间跨度内的动态依赖关系，对复杂异常模式和多类型故障的适应能力有限。因此，随着工业数据规模和复杂度不断提升，仅依靠传统方法已难以满足高精度、强泛化和实时异常检测的需求。
+
+	\subsection{深度学习异常检测方法}
+
+    深度学习方法能够通过端到端训练自动提取时序特征，在高维、非线性和强噪声场景中展现出更强的建模能力，已成为异常检测领域的重要研究方向。现有研究大体可以分为两类：一类是基于预测的方法，即利用历史序列预测未来观测值，并将预测误差作为异常判据；另一类是基于重构的方法，即通过自编码器、变分自编码器或 Transformer 等模型学习正常样本的潜在表示，再根据重构误差识别异常。
+
+    以 LSTM、TCN 和 Transformer 为代表的深度时序模型在工业异常检测中得到了广泛应用。LSTM 擅长建模时间依赖关系，TCN 具有并行计算效率高、感受野可扩展等特点，Transformer 则依靠自注意力机制在长序列建模方面表现突出。与传统方法相比，深度学习模型减轻了对人工特征工程的依赖，更适合处理复杂工业系统中的高维动态数据。
+
+    尽管如此，现有深度学习异常检测方法仍然存在若干不足。其一，多数方法默认所有变量具有统一采样率，对多采样率场景下的规则性缺失和时间异步问题考虑不足。其二，很多模型主要聚焦时间维度建模，对变量间耦合关系、系统拓扑结构以及频域信息的利用仍不充分。其三，在实际部署中，异常阈值的设定、噪声干扰的抑制以及模型可解释性等问题仍然是影响检测性能的重要因素。
+	
+	\section{多采样率时间序列建模研究现状}
+
+    采样率过程是一种普遍存在且不可回避的现象。多采样率过程的一个核心特征在于：采集到的数据中包含大量缺失值。在现代化工业系统中，借助多种传感器对设备或过程进行实时监测已成为常见的做法。随着智能制造和工业物联网(Industrial Internet of Things, IIoT)的发展，越来越多的设备和系统配备了不同类型的传感器，以提供实时的运行状态和性能数据。这些传感器的多样性不仅体现在硬件类型的差异，还表现在它们各自的采样频率上。这种采样频率的不一致性，导致最终形成的数据集尤其针对低频采样变量不可避免地包含大量缺失值。这些缺失值不仅直接影响数据的完整性和一致性，还使得后续的分析和建模工作变得更加复杂。尤其是在故障检测任务中，缺失值可能掩盖潜在的故障信号或误导模型的学习过程，从而降低故障检测的准确性和可靠性；同时不同观测样本之间的时间间隔也表现出明显的不均匀性。尤其是关键质量变量的观测样本极为有限；此外，由于不同变量之间不仅存在复杂的时序相关性，还存在空间与功能层面的耦合关系，给这类数据的建模带来了巨大挑战。如何在多采样率环境下实现合理的缺失值处理，已成为当前故障检测算法研究中的一个亟待解决的难题。目前针对多采样率时间建模可分为现有方法可归纳为三大类：降采样法、基于直接建模的方法、和基于数据插补的方法。
+
+    \subsection{降采样方法}
+
+    降采样方法按照相同的采样频率将数据重新排列成多个采样率组并通过丢弃数据将高频采样变量降低至与低频采样变量相同的采样率。
+
+    这类方法往往无法适应多采样率环境下的数据特点，可能导致丢失高频变量中所包含的重要动态信息，从而降低模型对快速变化过程的感知能力；同时引入人为噪声，破坏数据原有的时间依赖结构。正如 Lu 等人（2024）所指出的，将多采样率多变量时间序列（Multirate Multivariate Time Series, MR-MTS）强制转换为统一采样率的多变量时间序列，往往会导致信息的丢失或结构性的扭曲。为了充分挖掘数据中潜在的有用信息，研究者们正在探索更为创新的解决方案，这些方案不仅要有效填补缺失值，还要考虑到采样频率差异对模型性能的影响。只有在解决了这些问题后，才能更好地利用多采样率数据，提升故障检测算法的精度与鲁棒性。 
+
+    \subsection{直接建模方法}
+
+    一类研究致力于设计端到端模型，直接对多采样率数据进行建模，从而避免显式插补带来的潜在误差。Lu 等人（2024）提出的多采样率感知长短期记忆网络（Multirate-Aware LSTM, MRA-LSTM）即为代表性工作之一。
+
+    早期研究中，LSTM Units Achieves（LSTMa）和LSTM Time-Series Network（LSTNet）等模型通过将时间依赖关系划分为长期影响与短期依赖，并引入注意力机制来提取多尺度特征，在一定程度上缓解了缺失值带来的影响。然而，当多采样率问题较为严重时，这类模型依赖的参数共享策略可能难以有效刻画不同采样频率变量的异质演化规律。Lu 等人（2024）提出的MRA-LSTM通过引入多采样率感知结构和多尺度更新机制，能够在时间维度上权衡不同频率信息的重要性，避免高频变量对低频变量依赖关系的掩盖。其核心思想在于：如果模型能够明确“感知”每个输入样本的采样率或时间间隔，并在推理过程中加以区分，则无需对数据进行强制对齐，也能学习到真实的时序依赖关系。已知大多数推理过程在每个时间步执行，高采样率数据获得更多参与推理的机会。为了避免这一情况，该网络以多个传感器时间序列作为输入，统一构建时间轴，对低频数据使用最近邻/保持，对高频数据保留原始时间步，并提出采样率感知编码
+
+    MRA-LSTM的研究表明了多尺度特征融合的重要性，这对于设计插补后的异常检测模型具有重要的参考价值。然而，该方法在处理特征缺失值时存在显著不足。其策略是直接忽略缺失值，而未针对缺失数据进行合理的插补或补全，这种简单的处理方式可能导致数据中的潜在模式和关键信息被丢弃，严重限制了模型对样本演变规律的学习能力。
+
+    Song等人提出了一种多时序通道卷积神经网络（Multitemporal Channels Convolutional Neural Network, MC-CNN），该方法利用改进的反向传播（Back Propagation, BP）算法处理带有缺失值的输入序列，然后再利用卷积神经网络进行局部特征提取，再通过全连接层映射。尽管MC-CNN 在处理局部特征提取方面取得一定成果，但与MRA-LSTM 相似，MC-CNN 在缺失值处理上仍然依赖于简单的忽略策略，可能导致模型无法有效地挖掘出潜在的关键信息，从而影响最终的预测精度和泛化能力。 
+
+    尽管近年来提出的多采样率直接建模和故障检测方法在一定程度上解决了采样频率差异带来的问题，但在处理数据缺失和信息不完整的情况下，仍然存在许多挑战。仅通过简单的忽略策略来应对，往往无法有效利用数据中潜藏的有价值信息。缺失值可能包含着重要的时序关系，而不进行合理的插补或补全处理，很可能导致数据中潜在模式的丢失，从而影响模型对故障发生的预测准确性。
+
+    \subsection{数据插补方法}
+
+    基于数据插补的方法首先将所有变量按照最高采样率在时间轴上对齐，然后通过对数据建模的方法填补缺失点，得到完整的数据集，最后利用该数据集进行建模和异常检测。
+
+    Liu 等人提出了一种基于Transformer 的多层多采样率网络（Multirate-Former），该方法引入了采样率编码，首先通过多层卷积神经网络学习数据的局部特征，并进行粗粒度的数据补全，随后通过嵌入采样率和相位信息作为位置编码并利用Transformer进行异常检测。然而该方法未能充分利用数据全局信息导致整体检测效果不佳。
+    
+    Xin 等人提出了一种基于多采样率数据的工业控制与物联网系统（Industrial Cyber-Physical Systems, ICPSs）异常检测方法，该方法采用一种机制模型（Mechanism Model, MM），在时间域和空间域对数据进行超分辨率处理，以填补缺失的数据，并通过扩展额外的虚拟空间状态来补充数据特征。然而，该方法使用的机制模型是一种基于数学或计算机理论的模型，用于描述、模拟和解释系统的内部运作机制，依赖于先验得知特定系统的物理或工程特性，建模难度较高且自适应性较差。
+    
+    目前，数据插补方法有效解决了不同采样率的数据在异常检测中的作用不平衡的问题，利用了低频变量信息，降低了建模难度，但现有数据插补方法仍存在插补效果不足的问题。
+
+    \section{相关理论与关键技术}
+
+    多采样率工业过程异常检测涉及变量关系建模、频域结构分析以及长程依赖建模等多个方面。为此，本文在模型设计中综合引入图卷积网络、时序卷积网络、傅里叶变换与 Transformer 等关键技术。本章围绕上述三类方法展开介绍，重点说明其基本思想、核心公式、主要特点及其在工业时间序列建模中的适用性，为后续章节的方法设计与实验分析提供理论基础。
+
+    \subsection{图卷积网络}
+    
+    \subsubsection{图结构表示}
+    
+    与规则网格数据不同，工业系统中的多变量关系通常具有显著的非欧式结构特征。例如，电压、电流、功率、温度和状态量之间往往存在复杂的物理耦合与控制耦合，这类关系难以用传统的一维或二维卷积直接表示。图结构能够以更加自然的方式描述变量之间的关联，因此适合用于工业多变量数据建模。
+    
+    一般将图表示为
+    \begin{equation}
+        \mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathbf{A}),
+    \end{equation}
+    其中，$\mathcal{V}$ 表示节点集合，$\mathcal{E}$ 表示边集合，$\mathbf{A} \in \mathbb{R}^{N \times N}$ 表示邻接矩阵，$N$ 为节点数。当节点 $i$ 与节点 $j$ 存在连接关系时，$A_{ij} > 0$；否则 $A_{ij} = 0$。若每个节点都带有特征向量，则可定义节点特征矩阵
+    \begin{equation}
+        \mathbf{X} = [\mathbf{x}_1, \mathbf{x}_2, \ldots, \mathbf{x}_N]^\top \in \mathbb{R}^{N \times F},
+    \end{equation}
+    其中 $F$ 为节点特征维数。
+    
+    在工业过程场景中，可以将每个传感器变量视为一个节点，将变量间的统计相关性、物理耦合关系或数据驱动学习得到的依赖关系视为边。这样，复杂多变量系统就被转化为图上的特征传播与表示学习问题。
+    
+    \subsubsection{图卷积的基本原理}
+    
+    图卷积网络（Graph Convolutional Network, GCN）的核心思想是通过节点与其邻居之间的消息传递，实现图结构上的局部特征聚合。对于节点 $i$ 而言，其更新后的表示不仅依赖于自身特征，也依赖于邻居节点的信息。因此，图卷积可以看作一种``基于拓扑结构的加权邻域平均''。
+    
+    经典 GCN 的一层传播公式可写为
+    \begin{equation}
+        \mathbf{H}^{(l+1)} =
+        \sigma\!\left(
+            \hat{\mathbf{D}}^{-1/2}
+            \hat{\mathbf{A}}
+            \hat{\mathbf{D}}^{-1/2}
+            \mathbf{H}^{(l)}
+            \mathbf{W}^{(l)}
+        \right),
+    \end{equation}
+    其中，$\mathbf{H}^{(l)}$ 表示第 $l$ 层输入特征，$\mathbf{W}^{(l)}$ 为可学习权重矩阵，$\sigma(\cdot)$ 为非线性激活函数，$\hat{\mathbf{A}} = \mathbf{A} + \mathbf{I}$ 表示加入自环后的邻接矩阵，$\hat{\mathbf{D}}$ 为对应的度矩阵，即
+    \begin{equation}
+        \hat{D}_{ii} = \sum_j \hat{A}_{ij}.
+    \end{equation}
+    
+    上述公式包含三个关键步骤。首先，通过加入单位矩阵 $\mathbf{I}$ 为每个节点保留自环，使节点在聚合邻居信息时不会丢失自身表示。其次，通过 $\hat{\mathbf{D}}^{-1/2}\hat{\mathbf{A}}\hat{\mathbf{D}}^{-1/2}$ 对邻接矩阵进行对称归一化，避免高度节点在传播过程中产生过强影响，并提升训练稳定性。最后，通过线性变换和非线性映射实现特征空间上的投影与更新。
+    
+    \subsubsection{图卷积在本文中的作用}
+    
+    本文所研究的多采样率异常检测任务中，不同变量之间存在复杂而隐式的关联关系，仅依靠逐变量时序建模难以充分利用这些信息。图卷积能够在变量维度上实现信息传播，为低频变量的插补和异常状态的识别提供结构约束。因此，图卷积是本文完成跨变量依赖建模的重要基础。
+    
+    \subsection{傅里叶变换与频域分析}
+    
+    \subsubsection{离散傅里叶变换}
+    
+    时间序列既可以在时域中表示，也可以在频域中表示。时域描述信号随时间的变化过程，频域则刻画信号由哪些频率成分组成。傅里叶变换正是完成时域与频域转换的核心工具。
+    
+    对于长度为 $N$ 的离散时间序列 $\{x[n]\}_{n=0}^{N-1}$，其离散傅里叶变换（Discrete Fourier Transform, DFT）定义为
+    \begin{equation}
+        X[k] = \sum_{n=0}^{N-1} x[n] e^{-j 2\pi kn / N}, \qquad k = 0,1,\ldots,N-1,
+    \end{equation}
+    其中 $j = \sqrt{-1}$ 为虚数单位。对应的逆变换为
+    \begin{equation}
+        x[n] = \frac{1}{N}\sum_{k=0}^{N-1} X[k] e^{j 2\pi kn / N}.
+    \end{equation}
+    
+    频谱 $X[k]$ 是复数形式，可以进一步分解为实部、虚部、幅值和相位。其中，幅值 $|X[k]|$ 反映第 $k$ 个频率分量的能量大小，相位 $\angle X[k]$ 则表示其相位偏移。对于工业信号而言，周期振荡、谐波成分和噪声干扰往往在频域中具有更加直观的表现形式。
+    
+    \subsubsection{快速傅里叶变换}
+    
+    直接计算 DFT 的时间复杂度为 $O(N^2)$，当序列长度较大时计算开销较高。快速傅里叶变换（Fast Fourier Transform, FFT）通过利用复指数项的对称性与周期性，将复杂度降为
+    \begin{equation}
+        O(N \log N),
+    \end{equation}
+    从而显著提高了频域分析效率。对于实值序列，还可以采用仅保留非冗余频谱部分的实数快速傅里叶变换（rFFT），进一步降低存储与计算成本。
+    
+    因此，FFT 已成为信号处理和深度学习时序建模中最常用的频域分析工具之一。它不仅适用于传统谱分析，也能够与神经网络结合，用于学习频率重要性、增强关键频段表示或构造频域损失函数。
+    
+    \subsubsection{频域分析在异常检测中的意义}
+    
+    很多工业异常在时域中的表现并不十分显著，但在频域中往往具有更好的可分性。例如，谐波畸变会导致特定频段能量增强，机械振动异常会表现为主频漂移或边频出现，噪声污染则常表现为高频能量异常增加。因此，引入频域分析有助于从另一种视角揭示异常特征。
+    
+    对于多采样率工业数据而言，频域分析还具有两点额外意义。其一，频域表征有助于增强对周期结构和重复模式的建模能力；其二，频域约束可以作为时域重构的补充，缓解单纯依赖均方误差时容易出现的过度平滑问题。当然，在处理缺失值较多或零填充较强的序列时，频域分析也可能受到频谱泄露影响，因此通常需要结合掩码机制、插补策略或频域注意力方法共同使用。
+    
+    \subsubsection{傅里叶变换在本文中的作用}
+    
+    本文所研究的电源系统及相关工业场景具有明显的周期性与频谱结构特征，部分异常在频域中的可分性优于时域。因而，傅里叶变换为本文构建频域分支、强化谐波与周期特征表达提供了必要基础，是实现时频协同异常检测的重要理论支撑。
+    
+    \subsection{Transformer}
+    
+    \subsubsection{自注意力机制}
+    
+    Transformer 是近年来序列建模领域最具代表性的深度学习结构之一，其核心是自注意力机制（Self-Attention）。与卷积和循环结构不同，自注意力能够直接建立序列任意两个位置之间的联系，从而更高效地捕获长距离依赖关系。
+    
+    设输入序列表示为
+    \begin{equation}
+        \mathbf{H} \in \mathbb{R}^{T \times d},
+    \end{equation}
+    其中 $T$ 为序列长度，$d$ 为特征维数。首先通过线性变换得到查询矩阵、键矩阵和值矩阵：
+    \begin{equation}
+        \mathbf{Q} = \mathbf{H}\mathbf{W}_Q,\qquad
+        \mathbf{K} = \mathbf{H}\mathbf{W}_K,\qquad
+        \mathbf{V} = \mathbf{H}\mathbf{W}_V.
+    \end{equation}
+    然后，自注意力输出为
+    \begin{equation}
+        \operatorname{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) =
+        \operatorname{softmax}\!\left(
+            \frac{\mathbf{Q}\mathbf{K}^{\top}}{\sqrt{d_k}}
+        \right)\mathbf{V},
+    \end{equation}
+    其中 $d_k$ 为键向量维度。上述公式表明，模型会根据查询向量与键向量的相似度，为不同位置分配不同权重，再对值向量进行加权求和。
+    
+    \subsubsection{多头注意力与位置编码}
+    
+    为了增强模型从不同子空间提取依赖关系的能力，Transformer 通常采用多头注意力（Multi-Head Attention）机制。若共有 $h$ 个注意力头，则第 $i$ 个头的输出为
+    \begin{equation}
+        \mathrm{head}_i =
+        \operatorname{Attention}(\mathbf{Q}_i, \mathbf{K}_i, \mathbf{V}_i),
+        \qquad i=1,2,\ldots,h.
+    \end{equation}
+    将所有头拼接后，再经线性变换得到最终结果：
+    \begin{equation}
+        \operatorname{MHA}(\mathbf{H}) =
+        \operatorname{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_h)\mathbf{W}_O.
+    \end{equation}
+    
+    由于自注意力本身对输入顺序不敏感，Transformer 还需要引入位置编码（Positional Encoding）来提供序列位置信息。位置编码可以采用固定的正弦余弦形式，也可以采用可学习参数形式，其本质都是让模型区分``不同时间步''的相对或绝对位置。
+    
+    \subsubsection{前馈网络与编码器结构}
+    
+    在标准 Transformer 编码器中，多头注意力模块后通常接有逐位置前馈网络（Feed-Forward Network, FFN），并配合残差连接与层归一化共同构成编码层。设输入为 $\mathbf{Z}_{l-1}$，则第 $l$ 层编码器可表示为
+    \begin{align}
+        \mathbf{Z}_l' &= \operatorname{LayerNorm}\!\left(
+            \mathbf{Z}_{l-1} + \operatorname{MHA}(\mathbf{Z}_{l-1})
+        \right), \\
+        \mathbf{Z}_l &= \operatorname{LayerNorm}\!\left(
+            \mathbf{Z}_l' + \operatorname{FFN}(\mathbf{Z}_l')
+        \right).
+    \end{align}
+    
+    前馈网络一般包含两层线性变换与非线性激活，其作用是对每个时间位置进行更充分的特征映射。残差连接能够改善梯度传播，层归一化则有助于稳定训练过程。通过多层编码器堆叠，Transformer 可以在全局范围内学习复杂的时间依赖与模式交互。
+    
+    \subsubsection{Transformer 的特点}
+    
+    Transformer 在时间序列建模中的主要优势体现在以下几个方面：
+    
+    \begin{itemize}
+        \item \textbf{全局依赖建模能力强。} 任意两个时间位置都可以直接建立联系，适合处理长序列依赖关系。
+        \item \textbf{表达能力丰富。} 多头机制能够从不同子空间学习多种相关模式，提高特征表示能力。
+        \item \textbf{适合与其他模块协同工作。} Transformer 可作为全局建模器，与卷积、图神经网络或频域模块结合，形成混合式时序建模框架。
+    \end{itemize}
+    
+    其局限性主要在于标准自注意力的时间复杂度为 $O(T^2)$，当序列较长时会带来较高的显存和计算开销。因此，在工程实践中常需要通过局部注意力、稀疏注意力或与局部特征提取模块结合的方式提高效率。
+    
+    \subsubsection{Transformer 在本文中的作用}
+    
+    本文将 Transformer 作为全局重构模块使用，目的是在完成局部时序特征提取和频域增强后，进一步建模整个时间窗口范围内的长程依赖关系。与图卷积和 TCN 相比，Transformer 更擅长捕捉跨越较长时间跨度的整体演化规律，因此能够为异常评分提供更高质量的重构结果。
+
+	\section{本文研究定位}
+	基于现有研究基础，本文围绕电源系统多采样率异常检测问题，针对插补不可靠、变量耦合建模不足及周期性异常感知能力弱等核心问题，提出融合自适应图结构与频域注意力机制的端到端异常检测模型。通过统一建模插补与检测任务，并结合图学习与频域特征增强方法，旨在提升模型在复杂多采样率电源系统场景下的检测性能与工程应用价值，并通过相关实验平台验证算法有效性与先进性。
+    \section{论文结构安排}
+    除本章外，全文其余部分拟安排如下：
+    \begin{itemize}
+        \item 第二章详细阐述面向多采样率异常检测的 AGF-ADNet 模型，包括数据表示方式、图结构学习机制、时频双分支插补策略以及异常评分方法。
+        \item 第三章利用三相全桥逆变系统实验平台进行验证，给出实验设计、评价指标与对比方法，并对模型在典型多采样率工业过程数据上的检测结果进行分析，验证所提方法的有效性。
+        \item 第四章对全文工作进行总结，归纳研究结论，并结合当前方法的局限性展望后续改进方向。
+    \end{itemize}
+
+
+	\chapter{模型介绍}
+
+    \section{总体思路}
+    
+    工业过程异常检测的核心任务是根据传感器采集到的多变量时间序列，及时识别设备故障、工况漂移或过程失稳等异常状态。与一般的分类任务不同，工业现场往往存在两个突出困难：一是不同传感器之间存在复杂耦合关系，单变量建模难以完整刻画系统动态；二是实际数据中常伴随缺失值、噪声以及多时间尺度变化，仅依靠单一时域特征容易造成异常模式刻画不充分。
+    
+    结合上述特点，\texttt{mra.py} 中实现了一种自适应图--频率融合异常检测网络 AGF-ADNet（Adaptive Graph-Frequency Anomaly Detection Network）。该模型采用基于重构的异常检测思想，即先利用正常工况数据训练模型学习序列的内在演化规律，再通过测试阶段的重构误差衡量样本是否偏离正常模式。如果输入样本属于正常状态，则模型通常能够较准确地恢复其主要动态结构；若输入样本含有故障扰动或显著分布偏移，模型的重构误差将明显增大，从而为异常判别提供依据。
+    
+    从实现机制上看，AGF-ADNet 不是一个单一路径的序列模型，而是一个融合了图结构学习、时域建模、频域增强、缺失值插补以及 Transformer 全局重构的复合网络。其设计逻辑可以概括为以下几点：
+    \begin{itemize}
+        \item 使用自适应图学习模块刻画变量之间的动态关联关系，使模型能够不依赖先验的物理结构进行建模；
+        \item 使用图卷积与多尺度时序卷积联合提取时域信息，以同时建模变量间依赖和不同时间尺度的动态模式；
+        \item 使用频域分支对序列的频谱结构进行增强，以补充时域建模对周期性、振荡性模式刻画不足的问题；
+        \item 使用门控融合模块自适应整合时域与频域特征，并在缺失位置生成插补结果；
+        \item 使用 Transformer 编码器在完整窗口范围内进行全局重构，最终输出每个时间步、每个变量的重构值。
+    \end{itemize}
+    
+    因此，AGF-ADNet 的本质可以理解为一种“先补全、再重构、再以误差判别异常”的混合式深度模型。对于本科毕业设计而言，这样的结构既保留了较强的工程可实现性，又具有比较清晰的模块划分，便于从数学原理和代码实现两个角度展开论述。
+    
+    \section{问题定义与符号说明}
+    
+    \subsection{输入数据形式}
+    
+    设原始工业过程数据表示为
+    \begin{equation}
+        \mathbf{D} = [\mathbf{d}_1, \mathbf{d}_2, \ldots, \mathbf{d}_T]^\top \in \mathbb{R}^{T \times N},
+    \end{equation}
+    其中，$T$ 表示时间长度，$N$ 表示监测变量个数，$\mathbf{d}_t \in \mathbb{R}^{N}$ 表示第 $t$ 个时刻全部传感器组成的观测向量。
+    
+    \texttt{mra.py} 中的数据通过读取多个 CSV 文件获得，每个文件不包含表头，列数即为变量个数。代码在运行时根据训练数据的列数自动确定模型中的节点数，因此虽然类定义中给出了默认值 $N=18$，但真正使用的变量维数由数据集本身决定。
+    
+    \subsection{缺失掩码定义}
+    
+    代码中采用如下掩码约定：
+    \begin{equation}
+        M_{t,n} =
+        \begin{cases}
+            1, & \text{若第 } t \text{ 个时刻第 } n \text{ 个变量缺失}, \\
+            0, & \text{若该位置有观测值}.
+        \end{cases}
+    \end{equation}
+    
+    这一定义与部分文献中“$1$ 表示已观测、$0$ 表示缺失”的写法正好相反，因此在撰写论文时必须特别说明，以免后续损失函数和插补公式的语义发生混淆。相应地，可定义观测掩码为
+    \begin{equation}
+        O_{t,n} = 1 - M_{t,n},
+    \end{equation}
+    其中 $O_{t,n}=1$ 表示当前位置可用于监督或评分。
+    
+    \subsection{窗口化输入张量}
+    
+    在深度学习中，滑动窗口（Sliding Window）是一种经典且高效的数据处理与特征提取机制，广泛应用于时间序列分析、自然语言处理以及计算机视觉等领域。其核心作用在于通过一个固定尺寸的窗口在输入数据上按设定的步长进行平移，从而将全局的长序列或大尺寸矩阵切分为一系列局部的感受野。这种机制使得模型能够专注于捕捉局部的空间结构或时间依赖关系，有效提取细粒度的局部特征。此外，滑动窗口技术在处理变长输入时表现出极大的灵活性。它不仅能将复杂、非定长的原始数据转化为标准化、固定维度的局部数据块，以适配神经网络的输入要求，还能通过窗口的滑动操作实现参数共享与特征复用，显著增强了模型对数据平移变换的鲁棒性。本文采用长度为 $S$ 的滑动窗口构造样本。窗口长度选取为
+    \begin{equation}
+        S = 60.
+    \end{equation}
+    
+    在形成批量样本后，模型输入张量记为
+    \begin{equation}
+        \mathbf{X} \in \mathbb{R}^{B \times S \times N}, \qquad
+        \mathbf{M} \in \{0,1\}^{B \times S \times N},
+    \end{equation}
+    其中 $B$ 为批大小，默认取 $32$。张量元素 $X_{b,s,n}$ 表示第 $b$ 个样本在窗口内第 $s$ 个时间步、第 $n$ 个变量上的数值。
+    
+    \subsection{模型输出}
+    
+    对于一个批次的输入，AGF-ADNet 的前向传播可以表示为
+    \begin{equation}
+        (\hat{\mathbf{X}}, \mathbf{A}, \mathbf{X}^{\mathrm{imp}})
+        = f_{\theta}(\mathbf{X}^{\mathrm{in}}, \mathbf{M}),
+    \end{equation}
+    其中：
+    \begin{itemize}
+        \item $\mathbf{X}^{\mathrm{in}}$ 为经过缺失位置清零后的实际输入；
+        \item $\hat{\mathbf{X}} \in \mathbb{R}^{B \times S \times N}$ 为最终重构结果；
+        \item $\mathbf{A} \in \mathbb{R}^{B \times N \times N}$ 为自适应学习到的邻接矩阵；
+        \item $\mathbf{X}^{\mathrm{imp}} \in \mathbb{R}^{B \times S \times N}$ 为时频融合后得到的插补结果。
+    \end{itemize}
+    
+    \section{数据预处理与样本构造}
+    
+    \subsection{数据读取与拼接}
+    
+    \texttt{DatasetBuilder.load\_dir()} 会读取指定目录下所有匹配模式的 CSV 文件，并按照文件名排序后在时间维进行拼接。设第 $k$ 个文件对应的矩阵为 $\mathbf{D}^{(k)} \in \mathbb{R}^{T_k \times N}$，则整体数据可写为
+    \begin{equation}
+        \mathbf{D} =
+        \begin{bmatrix}
+            \mathbf{D}^{(1)} \\
+            \mathbf{D}^{(2)} \\
+            \vdots \\
+            \mathbf{D}^{(K)}
+        \end{bmatrix}.
+    \end{equation}
+    
+    缺失掩码则由 \texttt{NaN} 位置直接生成：
+    \begin{equation}
+        M_{t,n} = \mathbb{I}(D_{t,n}\ \text{is NaN}),
+    \end{equation}
+    其中 $\mathbb{I}(\cdot)$ 为指示函数。
+    
+    \subsection{标准化处理}
+    
+    标准化模块使用 \texttt{StandardScaler} 完成 Z-score 变换。由于标准化算子无法直接处理 \texttt{NaN}，代码先将缺失位置临时填充为 $0$，然后仅基于训练集估计均值与标准差。设经零填充后的训练数据为 $\bar{\mathbf{D}}^{\mathrm{tr}}$，则第 $n$ 个变量的标准化参数为
+    \begin{equation}
+        \mu_n = \frac{1}{T_{\mathrm{tr}}}\sum_{t=1}^{T_{\mathrm{tr}}} \bar{D}^{\mathrm{tr}}_{t,n},
+        \qquad
+        \sigma_n = \sqrt{\frac{1}{T_{\mathrm{tr}}}\sum_{t=1}^{T_{\mathrm{tr}}}
+        \left(\bar{D}^{\mathrm{tr}}_{t,n} - \mu_n\right)^2 }.
+    \end{equation}
+    
+    随后训练集和测试集都使用同一组统计量进行缩放：
+    \begin{equation}
+        D^{\mathrm{scaled}}_{t,n} = \frac{\bar{D}_{t,n} - \mu_n}{\sigma_n}.
+    \end{equation}
+    
+    这种做法符合机器学习实验中的基本原则，即测试集不能参与标准化参数的估计，从而避免信息泄露。
+    
+    \subsection{滑动窗口构造}
+    
+    给定序列长度 $T$、窗口长度 $S$ 和步长 $\delta=1$，脚本以每一个时间步作为窗口终点构造样本。如果当前时刻历史长度不足 $S$，则使用首个样本进行前端填充。第 $i$ 个窗口可写为
+    \begin{equation}
+        \mathbf{X}^{(i)} =
+        \begin{cases}
+            [\underbrace{\mathbf{d}_1, \ldots, \mathbf{d}_1}_{S-i-1}, \mathbf{d}_1, \mathbf{d}_2, \ldots, \mathbf{d}_{i+1}], & i < S, \\
+            [\mathbf{d}_{i-S+2}, \ldots, \mathbf{d}_{i+1}], & i \geq S.
+        \end{cases}
+    \end{equation}
+    
+    对应的掩码窗口 $\mathbf{M}^{(i)}$ 按相同方式生成。这样处理有两个优点：其一，不会因为序列起始位置历史长度不足而丢弃早期样本；其二，可保证窗口构造后样本总数与原始时间长度一致，更便于后续分数序列与时间轴对齐。
+    
+    \subsection{输入清零操作}
+    
+    在模型前向传播前，脚本通过
+    \begin{equation}
+        \mathbf{X}^{\mathrm{in}} = \mathbf{X} \odot (1 - \mathbf{M})
+    \end{equation}
+    将缺失位置直接置零，其中 $\odot$ 表示逐元素乘法。这样处理后，模型看到的是“观测值 + 缺失位置零占位”的输入张量，而缺失信息本身则通过掩码张量显式传入网络。
+    
+    \section{模型总体结构}
+    
+    从模块级别看，AGF-ADNet 的数据流可以概括为
+    \begin{align}
+        \mathbf{A} &= \operatorname{GraphLearner}(\mathbf{X}^{\mathrm{in}}, \mathbf{M}), \\
+        \mathbf{H}^{\mathrm{time}} &= \operatorname{TimeBranch}(\mathbf{X}^{\mathrm{in}}, \mathbf{A}), \\
+        \mathbf{H}^{\mathrm{freq}} &= \operatorname{FreqBranch}(\mathbf{X}^{\mathrm{in}}), \\
+        \mathbf{X}^{\mathrm{imp}} &= \operatorname{Fusion}(\mathbf{H}^{\mathrm{time}}, \mathbf{H}^{\mathrm{freq}}), \\
+        \mathbf{X}^{\mathrm{filled}} &= \mathbf{X}^{\mathrm{in}} \odot (1-\mathbf{M}) + \mathbf{X}^{\mathrm{imp}} \odot \mathbf{M}, \\
+        \hat{\mathbf{X}} &= \operatorname{TransformerRecon}(\mathbf{X}^{\mathrm{filled}}).
+    \end{align}
+    
+    由此可见，模型并不是直接对原始输入进行重构，而是先通过图结构和时频信息融合得到一个插补结果，用它补足缺失位置，再对完整窗口进行全局重构。这样的两阶段设计能够显著增强模型对缺失场景和复杂动态场景的适应能力。
+    
+    \section{自适应图学习模块}
+    
+    \subsection{设计动机}
+    
+    工业过程中多个变量之间往往存在显著耦合关系。例如，流量变化会影响压力，温度变化又可能进一步传导至反应速率或产品浓度。如果完全忽略这种变量间结构，仅依靠逐变量时序建模，模型会损失大量有效信息。因此，AGF-ADNet 首先使用图结构来表达变量之间的依赖关系，并且不依赖人工先验图，而是通过可学习方式自动生成邻接矩阵。
+    
+    \subsection{动态上下文特征构造}
+    
+    在 \texttt{GraphLearner} 中，每个变量节点都需要一个能够描述当前窗口状态的特征向量。代码从输入窗口中为每个节点提取四类动态统计量：
+    \begin{itemize}
+        \item 观测均值；
+        \item 观测标准差；
+        \item 最近一次观测值；
+        \item 缺失比例。
+    \end{itemize}
+    
+    设第 $b$ 个样本中第 $n$ 个节点的窗口序列为 $\{x_{b,1,n}, \ldots, x_{b,S,n}\}$，观测掩码为 $o_{b,s,n}=1-m_{b,s,n}$，则上述统计量分别为
+    \begin{align}
+        \mu_{b,n} &= \frac{\sum_{s=1}^{S} x_{b,s,n} o_{b,s,n}}
+        {\sum_{s=1}^{S} o_{b,s,n} + \varepsilon}, \\
+        \sigma_{b,n} &= \sqrt{
+            \frac{\sum_{s=1}^{S}\left(x_{b,s,n} - \mu_{b,n}\right)^2 o_{b,s,n}}
+            {\sum_{s=1}^{S} o_{b,s,n} + \varepsilon}
+            + 10^{-6}}, \\
+        \ell_{b,n} &= x_{b,s^\ast,n}, \qquad
+        s^\ast = \arg\max_{s}(s \cdot o_{b,s,n}), \\
+        r_{b,n} &= \frac{1}{S}\sum_{s=1}^{S} m_{b,s,n},
+    \end{align}
+    其中 $\varepsilon$ 为防止分母为零的极小常数。于是节点的动态描述向量可以写为
+    \begin{equation}
+        \mathbf{d}_{b,n} = [\mu_{b,n}, \sigma_{b,n}, \ell_{b,n}, r_{b,n}] \in \mathbb{R}^{4}.
+    \end{equation}
+    
+    上述设计具有明确的工程意义：均值和标准差用于刻画窗口整体分布，最近观测值强调当前状态，缺失比例则反映该节点在当前窗口中的信息可靠性。
+    
+    \subsection{静态上下文与坐标先验}
+    
+    除动态特征外，代码还为每个节点引入两类可学习静态参数：
+    \begin{itemize}
+        \item \texttt{static\_context}：维度为 $d_s=8$ 的静态上下文向量；
+        \item \texttt{node\_coords}：维度为 $d_c=8$ 的节点坐标向量。
+    \end{itemize}
+    
+    其中，静态上下文向量可理解为节点的全局身份编码，用于补充长期稳定的结构信息；节点坐标则用于构造一个基于距离的先验邻接矩阵。若未提供外部基础邻接矩阵，则图先验定义为
+    \begin{equation}
+        P_{i,j} =
+        \begin{cases}
+            \dfrac{1}{1+\|\mathbf{u}_i - \mathbf{u}_j\|_2}, & i \neq j, \\
+            0, & i=j,
+        \end{cases}
+    \end{equation}
+    其中 $\mathbf{u}_i \in \mathbb{R}^{d_c}$ 表示第 $i$ 个节点的可学习坐标。该公式的含义是：坐标越接近的节点，其潜在关联程度越高。
+    
+    \subsection{节点表示编码}
+    
+    将动态特征与静态上下文拼接后，可得到节点输入向量
+    \begin{equation}
+        \mathbf{q}_{b,n} = [\mathbf{d}_{b,n}, \mathbf{c}_n] \in \mathbb{R}^{4+d_s},
+    \end{equation}
+    其中 $\mathbf{c}_n$ 为第 $n$ 个节点的静态上下文。随后，代码使用两层感知机进行编码：
+    \begin{equation}
+        \mathbf{h}_{b,n} =
+        \phi\left(
+            \mathbf{W}_2
+            \phi(\mathbf{W}_1 \mathbf{q}_{b,n} + \mathbf{b}_1)
+            + \mathbf{b}_2
+        \right),
+    \end{equation}
+    其中 $\phi(\cdot)$ 为 ReLU 激活函数，隐藏维度取 $32$。
+    
+    \subsection{边权生成机制}
+    
+    为了估计节点 $i$ 与节点 $j$ 之间的关联强度，代码为每一对节点构造如下配对特征：
+    \begin{equation}
+        \mathbf{p}_{b,i,j} =
+        [\mathbf{h}_{b,i},
+        \mathbf{h}_{b,j},
+        |\mathbf{h}_{b,i} - \mathbf{h}_{b,j}|,
+        \mathbf{h}_{b,i} \odot \mathbf{h}_{b,j}],
+    \end{equation}
+    其中 $|\cdot|$ 表示逐元素绝对值，$\odot$ 表示逐元素乘法。该设计同时编码了节点自身表示、差异关系和交互关系，能够较充分地反映两节点之间的相似性与互补性。
+    
+    边修正项由一个两层 MLP 给出：
+    \begin{equation}
+        E_{b,i,j} = \operatorname{ReLU}\!\left(
+            \mathbf{w}_e^\top
+            \phi(\mathbf{W}_e \mathbf{p}_{b,i,j} + \mathbf{b}_e)
+            + b_e'
+        \right).
+    \end{equation}
+    
+    最终的自适应邻接矩阵由“边修正项”和“图先验”逐元素相乘得到：
+    \begin{equation}
+        A'_{b,i,j} = E_{b,i,j} \cdot P_{i,j}.
+    \end{equation}
+    
+    随后，模型显式加入自环：
+    \begin{equation}
+        A''_{b,i,j} = A'_{b,i,j} + \lambda \delta_{i,j},
+    \end{equation}
+    其中 $\lambda=1.0$，$\delta_{i,j}$ 为 Kronecker delta 函数。自环的作用是保留节点自身信息，避免图卷积过程中节点特征完全由邻居决定。
+    
+    \subsection{对称归一化}
+    
+    为稳定图卷积运算，代码对邻接矩阵进行对称归一化。定义度矩阵
+    \begin{equation}
+        D_{b,i,i} = \sum_{j=1}^{N} A''_{b,i,j},
+    \end{equation}
+    则归一化邻接矩阵为
+    \begin{equation}
+        \tilde{\mathbf{A}}_b = \mathbf{D}_b^{-1/2}\mathbf{A}''_b\mathbf{D}_b^{-1/2}.
+    \end{equation}
+    
+    值得注意的是，该邻接矩阵是按批次动态生成的，即不同输入窗口可以对应不同的图结构。这一特性使模型具有更强的状态感知能力，也意味着图学习结果不是全局固定图，而是“样本相关图”。
+    
+    \section{时域建模分支}
+    
+    \subsection{图卷积层}
+    
+    时域分支的第一部分是图卷积层 \texttt{GCNLayer}。其输入为
+    \begin{equation}
+        \mathbf{X}^{\mathrm{in}} \in \mathbb{R}^{B \times S \times N}.
+    \end{equation}
+    代码先在最后增加一个特征维，得到
+    \begin{equation}
+        \mathbf{X}^{4\mathrm{D}} \in \mathbb{R}^{B \times S \times N \times 1},
+    \end{equation}
+    然后对最后一维进行线性映射，再结合邻接矩阵做图传播：
+    \begin{equation}
+        \mathbf{H}^{\mathrm{gcn}}_{b,s,:,:}
+        = \tilde{\mathbf{A}}_b
+        \left(
+            \mathbf{X}^{4\mathrm{D}}_{b,s,:,:}\mathbf{W}_g + \mathbf{b}_g
+        \right).
+    \end{equation}
+    
+    由于输入维度和输出维度都设置为 $1$，因此这一层更接近“在变量关系图上做一次结构感知平滑与重分配”，其核心价值在于把某个传感器的表示与相关传感器的信息进行融合。
+    
+    \subsection{多尺度时间卷积网络}
+    
+    时域分支的第二部分是 \texttt{MultiScaleTCN}。该模块在每个变量通道上分别施加多种不同感受野的一维卷积，卷积核集合为
+    \begin{equation}
+        \mathcal{K} = \{3,5,9\}.
+    \end{equation}
+    
+    代码中采用 \texttt{groups=num\_nodes} 的卷积方式，因此每个变量独立进行时间卷积，属于典型的深度卷积（depthwise convolution）结构。设输入重新排列为
+    \begin{equation}
+        \mathbf{X}^{\top} \in \mathbb{R}^{B \times N \times S},
+    \end{equation}
+    则对于第 $k \in \mathcal{K}$ 个尺度、第 $n$ 个变量，其卷积结果为
+    \begin{equation}
+        y^{(k)}_{b,n,s}
+        =
+        \sum_{r=0}^{k-1}
+        w^{(k)}_{n,r}
+        x_{b,n,s+r-\lfloor k/2 \rfloor}
+        + b^{(k)}_n.
+    \end{equation}
+    
+    需要指出的是，\texttt{MultiScaleTCN} 类本身支持因果卷积和非因果卷积两种模式，但在 AGF-ADNet 主模型中设置为 \texttt{causal=False}，即采用对称填充。这样做意味着在窗口内部的重构阶段，模型可以同时利用过去和未来的上下文信息。由于本任务是窗口级重构而非在线一步预测，因此这种非因果设计是合理的。
+    
+    不同尺度卷积输出会先沿新维度堆叠，再通过一个线性层进行自适应融合。若将三种尺度的结果记为 $\mathbf{Y}^{(3)}$、$\mathbf{Y}^{(5)}$ 和 $\mathbf{Y}^{(9)}$，则融合结果可表示为
+    \begin{equation}
+        \mathbf{H}^{\mathrm{tcn}} =
+        \mathbf{W}_f
+        [\mathbf{Y}^{(3)}, \mathbf{Y}^{(5)}, \mathbf{Y}^{(9)}]
+        + \mathbf{b}_f.
+    \end{equation}
+    
+    \subsection{时域分支输出}
+    
+    图卷积输出与多尺度卷积输出在代码中直接相加：
+    \begin{equation}
+        \mathbf{H}^{\mathrm{time}} =
+        \operatorname{LayerNorm}(\mathbf{H}^{\mathrm{gcn}})
+        + \mathbf{H}^{\mathrm{tcn}}.
+    \end{equation}
+    
+    该结构体现出一种“空间依赖 + 时间演化”联合建模思想：前者强调不同变量之间的信息传播，后者强调单变量在不同时间尺度上的局部动态，两者互补后形成时域分支的综合表示。
+    
+    \section{频域建模分支}
+    
+    \subsection{频域建模的必要性}
+    
+    仅在时域中分析信号，虽然能够捕捉局部变化趋势，但对周期性波动、谐振模式和频率偏移等现象的刻画相对有限。工业过程中很多异常并不一定表现为绝对数值的剧烈变化，而可能表现为振荡频率变化、周期结构破坏或高频噪声增强。因此，在时域分支之外引入频域分支，有助于从另一个正交视角增强异常模式识别能力。
+    
+    \subsection{快速傅里叶变换}
+    
+    频域分支首先将输入从 $(B,S,N)$ 转换为 $(B,N,S)$，然后在时间维上执行实数快速傅里叶变换 \texttt{rFFT}：
+    \begin{equation}
+        \mathbf{X}_f = \operatorname{rFFT}(\mathbf{X}^{\top})
+        \in \mathbb{C}^{B \times N \times F},
+    \end{equation}
+    其中
+    \begin{equation}
+        F = \left\lfloor \frac{S}{2} \right\rfloor + 1.
+    \end{equation}
+    
+    由于输入是实值时间序列，采用 \texttt{rFFT} 可以避免对共轭对称频谱的重复计算，从而提高运算效率。
+    
+    \subsection{频率特征表示}
+    
+    设复数频谱可写为
+    \begin{equation}
+        \mathbf{X}_f = \mathbf{R} + j\mathbf{I},
+    \end{equation}
+    其中 $\mathbf{R}$ 和 $\mathbf{I}$ 分别表示实部和虚部。代码虽然额外计算了频谱的幅值与相位，但真正送入神经网络的是实部和虚部的拼接表示：
+    \begin{equation}
+        \mathbf{Z} = [\mathbf{R}; \mathbf{I}] \in \mathbb{R}^{B \times N \times 2F}.
+    \end{equation}
+    
+    这种表示方式保留了完整的频谱信息，因为实部和虚部共同决定了幅值与相位。
+    
+    \subsection{频率注意力机制}
+    
+    为了突出更重要的频率分量，频域分支设计了一个两层感知机作为注意力网络：
+    \begin{equation}
+        \boldsymbol{\alpha}
+        = \sigma\!\left(
+            \mathbf{W}^{\mathrm{att}}_2
+            \phi(\mathbf{W}^{\mathrm{att}}_1\mathbf{Z} + \mathbf{b}^{\mathrm{att}}_1)
+            + \mathbf{b}^{\mathrm{att}}_2
+        \right)
+        \in [0,1]^{B \times N \times F},
+    \end{equation}
+    其中 $\phi(\cdot)$ 为 ReLU 函数，$\sigma(\cdot)$ 为 Sigmoid 函数。由此得到的 $\alpha_{b,n,f}$ 表示第 $b$ 个样本中第 $n$ 个变量在第 $f$ 个频率分量上的重要程度。
+    
+    \subsection{频谱增强与残差更新}
+    
+    除注意力网络外，代码还构造了一个独立的频谱增强网络：
+    \begin{equation}
+        \mathbf{Z}^{\mathrm{enh}}
+        =
+        \mathbf{W}^{\mathrm{enh}}_2
+        \phi(\mathbf{W}^{\mathrm{enh}}_1\mathbf{Z} + \mathbf{b}^{\mathrm{enh}}_1)
+        + \mathbf{b}^{\mathrm{enh}}_2
+        \in \mathbb{R}^{B \times N \times 2F}.
+    \end{equation}
+    
+    将其拆分为增强实部和增强虚部：
+    \begin{equation}
+        \mathbf{Z}^{\mathrm{enh}} = [\Delta \mathbf{R}; \Delta \mathbf{I}],
+    \end{equation}
+    随后利用注意力权重进行逐频率调制：
+    \begin{equation}
+        \tilde{\mathbf{R}} = \mathbf{R} + \boldsymbol{\alpha} \odot \Delta \mathbf{R},
+        \qquad
+        \tilde{\mathbf{I}} = \mathbf{I} + \boldsymbol{\alpha} \odot \Delta \mathbf{I}.
+    \end{equation}
+    
+    因此增强后的复频谱为
+    \begin{equation}
+        \tilde{\mathbf{X}}_f = \tilde{\mathbf{R}} + j\tilde{\mathbf{I}}.
+    \end{equation}
+    
+    这种残差式更新而不是完全替换原频谱的做法，能够增强训练稳定性，并避免频域支路对原始谱结构造成过于激进的破坏。
+    
+    \subsection{逆变换恢复时域表示}
+    
+    最后，频域分支使用逆实数傅里叶变换将增强后的频谱恢复到时域：
+    \begin{equation}
+        \mathbf{H}^{\mathrm{freq}}
+        =
+        \operatorname{irFFT}(\tilde{\mathbf{X}}_f)
+        \in \mathbb{R}^{B \times N \times S}.
+    \end{equation}
+    再将其转回 $(B,S,N)$ 形式，并经过层归一化得到频域分支输出。由此，模型在同一输入窗口上同时获得时域表示与频域表示，为后续融合提供更全面的特征基础。
+    
+    \section{时频门控融合与缺失值插补}
+    
+    \subsection{门控融合机制}
+    
+    时域分支和频域分支关注的信息不同，前者更擅长提取局部趋势与变量耦合，后者更擅长提取周期结构与频谱特征。因此，直接简单相加并不一定能够取得最佳效果。为此，代码采用门控融合模块 \texttt{GatedFusion} 自适应决定两者的组合比例。
+    
+    设时域输出和频域输出分别为
+    \begin{equation}
+        \mathbf{H}^{\mathrm{time}},\ \mathbf{H}^{\mathrm{freq}} \in \mathbb{R}^{B \times S \times N}.
+    \end{equation}
+    将它们在变量通道维上拼接后，得到
+    \begin{equation}
+        \mathbf{C} \in \mathbb{R}^{B \times 2N \times S}.
+    \end{equation}
+    
+    随后门控网络通过两层一维卷积产生门控系数：
+    \begin{equation}
+        \mathbf{G}
+        =
+        \sigma\!\left(
+            \operatorname{Conv}_2(
+                \phi(\operatorname{Conv}_1(\mathbf{C}))
+            )
+        \right)
+        \in [0,1]^{B \times N \times S}.
+    \end{equation}
+    
+    将其转置回 $(B,S,N)$ 后，融合结果为
+    \begin{equation}
+        \mathbf{X}^{\mathrm{imp}}
+        =
+        \mathbf{G} \odot \mathbf{H}^{\mathrm{time}}
+        + (1-\mathbf{G}) \odot \mathbf{H}^{\mathrm{freq}}.
+    \end{equation}
+    
+    上述公式说明：当某个位置的门控值接近 $1$ 时，模型更依赖时域特征；当门控值接近 $0$ 时，更依赖频域特征。门控融合后再经过 \texttt{LayerNorm}，以稳定特征尺度。
+    
+    \subsection{缺失值插补}
+    
+    门控融合结果随后用于缺失值插补。代码的插补公式为
+    \begin{equation}
+        \mathbf{X}^{\mathrm{filled}}
+        =
+        \mathbf{X}^{\mathrm{in}} \odot (1-\mathbf{M})
+        + \mathbf{X}^{\mathrm{imp}} \odot \mathbf{M}.
+    \end{equation}
+    
+    该公式具有清晰的物理含义：对于已观测位置，直接保留原始输入；对于缺失位置，则使用模型给出的插补值。这样得到的 $\mathbf{X}^{\mathrm{filled}}$ 可以看作一个“观测值可信、缺失值可补”的完整窗口，为后续重构器提供更稳定的输入基础。
+    
+    \section{Transformer 全局重构模块}
+    
+    \subsection{输入投影与位置编码}
+    
+    为了在时间维上进一步捕捉长程依赖关系，AGF-ADNet 在插补之后引入 Transformer 编码器。由于 Transformer 的输入特征维需要固定，因此代码先使用线性层将每个时间步的 $N$ 维变量向量投影到 $d=64$ 维隐空间：
+    \begin{equation}
+        \mathbf{Z}_0 = \mathbf{X}^{\mathrm{filled}}\mathbf{W}_{\mathrm{in}} + \mathbf{b}_{\mathrm{in}},
+        \qquad
+        \mathbf{Z}_0 \in \mathbb{R}^{B \times S \times d}.
+    \end{equation}
+    
+    在此基础上，再加上可学习位置编码 $\mathbf{P} \in \mathbb{R}^{1 \times S \times d}$：
+    \begin{equation}
+        \mathbf{Z}_0' = \mathbf{Z}_0 + \mathbf{P}.
+    \end{equation}
+    
+    与经典 Transformer 中固定的正弦位置编码不同，代码采用可训练位置参数，使模型能够在特定工业序列长度下自主学习更适合本任务的位置表示。
+    
+    \subsection{Transformer 编码器}
+    
+    脚本使用两层 \texttt{TransformerEncoderLayer} 构造编码器，每层包含多头自注意力机制和前馈网络，主要超参数如下：
+    \begin{itemize}
+        \item 隐空间维度 $d=64$；
+        \item 注意力头数 $h=4$；
+        \item 前馈网络隐藏维度为 $128$；
+        \item Dropout 为 $0.1$；
+        \item 编码器层数为 $2$。
+    \end{itemize}
+    
+    将第 $l$ 层编码器记为 $\mathcal{T}^{(l)}(\cdot)$，则其计算过程可以抽象表示为
+    \begin{equation}
+        \mathbf{Z}_l = \mathcal{T}^{(l)}(\mathbf{Z}_{l-1}), \qquad l=1,2.
+    \end{equation}
+    
+    由于代码未为 Transformer 显式设置因果掩码，因此它在窗口范围内可以访问完整时序上下文。这与前文的非因果 TCN 设计保持一致，说明模型的目标并不是在线单步预测，而是利用完整窗口进行高质量重构。
+    
+    \subsection{输出投影与重构结果}
+    
+    经过两层编码器后，脚本使用输出线性层将隐表示恢复到变量空间：
+    \begin{equation}
+        \hat{\mathbf{X}} = \mathbf{Z}_2 \mathbf{W}_{\mathrm{out}} + \mathbf{b}_{\mathrm{out}},
+        \qquad
+        \hat{\mathbf{X}} \in \mathbb{R}^{B \times S \times N}.
+    \end{equation}
+    
+    至此，模型完成从缺失输入到完整重构序列的映射。后续训练和异常检测都围绕 $\hat{\mathbf{X}}$ 与原始真实窗口 $\mathbf{X}$ 的差异展开。
+    
+    \section{损失函数设计}
+    
+    \subsection{重构损失}
+    
+    AGF-ADNet 的训练目标由重构项、频域一致性项和图结构正则项三部分组成。首先，重构损失定义为
+    \begin{equation}
+        \mathcal{L}_{\mathrm{rec}}
+        =
+        \frac{
+            \left\|
+                (\hat{\mathbf{X}} - \mathbf{X}) \odot \mathbf{T}
+            \right\|_F^2
+        }{
+            \sum_{b,s,n} T_{b,s,n} + \varepsilon
+        },
+    \end{equation}
+    其中 $\mathbf{T}$ 为目标监督掩码，表示哪些位置应参与当前批次的重构监督。
+    
+    需要特别说明的是，$\mathbf{T}$ 并不总是简单等于观测掩码。在训练过程中，代码会在原本已观测的位置上随机再遮挡一部分值，以构造自监督恢复任务。因此，真正参与重构损失计算的通常是这些“人工遮挡位置”。
+    
+    \subsection{频域一致性损失}
+    
+    为了约束模型在频谱层面也保持重构一致性，脚本引入频域损失。定义仅在监督位置保留真实值、其余位置使用停止梯度后的重构值构成目标序列：
+    \begin{equation}
+        \mathbf{X}^{\mathrm{freq\_target}}
+        =
+        \operatorname{stopgrad}(\hat{\mathbf{X}})\odot(1-\mathbf{T})
+        + \mathbf{X}\odot\mathbf{T}.
+    \end{equation}
+    
+    随后，在观测比例超过 $50\%$ 的样本上比较重构序列与目标序列的幅值频谱：
+    \begin{equation}
+        \mathcal{L}_{\mathrm{freq}}
+        =
+        \frac{1}{|\Omega_v|}
+        \sum_{b \in \Omega_v}
+        \left\|
+            \left|\operatorname{rFFT}(\hat{\mathbf{X}}_b)\right|
+            -
+            \left|\operatorname{rFFT}(\mathbf{X}^{\mathrm{freq\_target}}_b)\right|
+        \right\|_F^2,
+    \end{equation}
+    其中 $\Omega_v$ 表示满足有效观测比例条件的样本集合。
+    
+    该设计的意义在于：即使某些时域位置不直接参与监督，模型仍需要在整体频率结构上与目标信号保持一致，从而提高对周期和振荡模式的恢复能力。
+    
+    \subsection{图结构熵正则项}
+    
+    代码中所谓的 \texttt{sparsity\_loss} 实际上采用的是负熵形式：
+    \begin{equation}
+        \mathcal{L}_{\mathrm{graph}}
+        =
+        -
+        \frac{1}{BN}
+        \sum_{b=1}^{B}
+        \sum_{i=1}^{N}
+        \sum_{j=1}^{N}
+        \tilde{A}_{b,i,j}\log(\tilde{A}_{b,i,j}+\varepsilon).
+    \end{equation}
+    
+    由于训练目标是最小化该项，因此优化过程会倾向于降低邻接分布的熵，使每个节点的连边更加集中，而不是平均地连接到所有节点。虽然它不是严格意义上的 $L_1$ 稀疏正则，但在效果上具有鼓励图结构“更尖锐、更有选择性”的作用。
+    
+    \subsection{总损失函数}
+    
+    综合上述三项，最终损失函数为
+    \begin{equation}
+        \mathcal{L}
+        =
+        \mathcal{L}_{\mathrm{rec}}
+        + \lambda_f \mathcal{L}_{\mathrm{freq}}
+        + \lambda_g \mathcal{L}_{\mathrm{graph}},
+    \end{equation}
+    其中当前实现中
+    \begin{equation}
+        \lambda_f = 0.1, \qquad \lambda_g = 0.1.
+    \end{equation}
+    
+    该组合损失体现出多目标优化思想：既要求时域重构准确，也要求频域结构一致，同时还要求图结构具有较好的判别性和稳定性。
+    
+    \section{训练策略与优化过程}
+    
+    \subsection{自监督随机遮挡训练}
+    
+    AGF-ADNet 采用自监督训练策略，其核心做法是在原本可观测的位置中随机挑选约 $10\%$ 进行再遮挡。设原始缺失掩码为 $\mathbf{M}$，随机遮挡得到的附加掩码为 $\mathbf{R}$，则训练输入掩码可表示为
+    \begin{equation}
+        \mathbf{M}^{\mathrm{in}} = \mathbf{M} \lor \mathbf{R}.
+    \end{equation}
+    
+    其中，$\lor$ 表示按位逻辑或。脚本随后根据 $\mathbf{M}^{\mathrm{in}}$ 构造输入
+    \begin{equation}
+        \mathbf{X}^{\mathrm{in}} = \mathbf{X} \odot (1-\mathbf{M}^{\mathrm{in}}).
+    \end{equation}
+    
+    与此同时，将随机遮挡位置作为主要监督目标，即
+    \begin{equation}
+        \mathbf{T} = \mathbf{R}.
+    \end{equation}
+    如果某个批次中随机遮挡结果为空，则退化为使用全部已观测位置进行监督。这样设计的优点是无需额外人工标签，模型即可通过“遮挡--恢复”任务学习正常工况的表示。
+    
+    \subsection{参数优化}
+    
+    训练过程中，脚本使用 Adam 优化器，初始学习率为
+    \begin{equation}
+        \eta_0 = 10^{-3}.
+    \end{equation}
+    
+    同时使用 \texttt{ReduceLROnPlateau} 学习率调度器。当训练损失在若干轮内不再下降时，学习率按比例衰减：
+    \begin{equation}
+        \eta \leftarrow 0.5 \eta.
+    \end{equation}
+    
+    此外，为了抑制梯度爆炸，代码还使用最大范数为 $1.0$ 的梯度裁剪。当前脚本中的训练轮数为 $3$ 轮，这一数值更接近于示例实现或快速实验配置；若在正式毕业设计实验中追求更充分的收敛效果，通常还需要结合验证结果进一步调节训练轮数。
+    
+    \subsection{最优模型保存}
+    
+    脚本在训练过程中记录当前最小平均损失对应的模型参数：
+    \begin{equation}
+        \theta^\ast = \arg\min_{\theta^{(e)}} \mathcal{L}^{(e)},
+    \end{equation}
+    其中 $\mathcal{L}^{(e)}$ 表示第 $e$ 轮训练的平均损失。训练结束后，程序会恢复到该最优参数状态，以降低偶然波动对测试阶段结果的影响。
+    
+    \section{异常评分与判别机制}
+    
+    \subsection{窗口级异常分数}
+    
+    模型训练完成后，脚本会对每个窗口计算重构误差，并以此作为异常分数。设观测掩码为 $\mathbf{O}=1-\mathbf{M}$，则第 $b$ 个窗口的异常分数定义为
+    \begin{equation}
+        s_b
+        =
+        \frac{
+            \sum_{s=1}^{S}\sum_{n=1}^{N}
+            \left(\hat{X}_{b,s,n} - X_{b,s,n}\right)^2 O_{b,s,n}
+        }{
+            \sum_{s=1}^{S}\sum_{n=1}^{N} O_{b,s,n} + \varepsilon
+        }.
+    \end{equation}
+    
+    从公式可以看出，异常评分只在真实观测位置上进行，缺失位置不会直接贡献测试误差。这一处理能够避免由于原始缺失值不可验证而造成评分失真。
+    
+    \subsection{阈值设定}
+    
+    脚本首先在训练集窗口上计算全部异常分数，然后用其均值加标准差作为阈值：
+    \begin{equation}
+        \tau = \mu_{\mathrm{train}} + \sigma_{\mathrm{train}}.
+    \end{equation}
+    
+    当测试窗口满足
+    \begin{equation}
+        s_b > \tau
+    \end{equation}
+    时，即判定其为异常；否则判定为正常。该阈值方法实现简单、便于复现，适用于训练集主要由正常样本组成的情形。
+    
+    \subsection{测试标签与评价指标}
+    
+    需要指出的是，\texttt{mra.py} 中的测试标签并非从外部标签文件读取，而是通过 \texttt{build\_test\_labels()} 人为构造：默认将测试分数序列前半段视为正常，后半段视为异常。该设定显然依赖于当前数据组织方式，因此在论文中应将其说明为“当前实验脚本采用的标签构造规则”，而不宜笼统表述为通用异常检测标注机制。
+    
+    在此基础上，代码计算了准确率（Accuracy）、精确率（Precision）、召回率（Recall）和 $F_1$ 值等分类指标，用于评估阈值判别效果。
+    
+    \section{模型特点分析}
+    
+    \subsection{模型优势}
+    
+    结合代码实现，AGF-ADNet 主要具有以下几个特点：
+    \begin{itemize}
+        \item \textbf{结构信息自适应学习。} 邻接矩阵无需人工指定，模型可根据当前窗口状态自动生成变量关系图；
+        \item \textbf{时域与频域联合建模。} 模型同时利用局部时序模式和频谱结构，提高了对复杂异常模式的表达能力；
+        \item \textbf{显式缺失值处理。} 通过掩码传递、门控融合和插补机制，模型能够在存在缺失值的情况下稳定工作；
+        \item \textbf{全局上下文重构。} Transformer 编码器使模型能够在整个窗口范围内建模长程依赖，提升重构质量；
+        \item \textbf{训练方式灵活。} 自监督随机遮挡机制减少了对人工标注的依赖，适合工业场景中“正常样本多、异常标签少”的实际情况。
+    \end{itemize}
+    
+    \subsection{实现层面的注意事项}
+    
+    从论文撰写角度看，还应注意以下几点：
+    \begin{itemize}
+        \item 缺失掩码的定义为“$1$ 表示缺失”，这一点必须在符号表中明确；
+        \item 图结构正则项实质上是低熵约束，而不是传统意义上的稀疏度约束；
+        \item 主模型中的时序卷积和 Transformer 都是非因果的，因此模型更适合窗口重构场景，而不是严格实时预测场景；
+        \item 当前脚本训练轮数较少，更多体现方法验证流程，正式实验时可进一步扩展训练与调参；
+        \item 测试标签采用顺序划分构造，因此实验章节应把数据组织方式和评估前提写清楚。
+    \end{itemize}
+    
+    \section{本章小结}
+    
+    本章基于 \texttt{mra.py} 的实际实现，对 AGF-ADNet 的数据预处理流程、图结构学习机制、时域与频域特征提取方法、时频门控融合策略、Transformer 重构过程、损失函数设计以及异常评分方法进行了系统说明。整体来看，该模型围绕“自适应结构建模 + 时频联合表示 + 掩码重构检测”这一主线展开，既考虑了工业变量之间的耦合关系，也兼顾了缺失值场景和多尺度动态特征，是一种具有较强综合性的工业过程异常检测方法。
+    
+    在后续实验章节中，可以进一步围绕该模型的检测性能、阈值选择、可视化结果以及与基线方法的对比情况展开分析，从而形成完整的本科毕业设计论文论证链条。
+    
+	\section{数据预处理}
+	\section{评价指标}
+	\chapter{实验设计}
+	\chapter{结果分析}
+
+	% 致谢
+	\acknowledgement
+
+
+\end{document}
