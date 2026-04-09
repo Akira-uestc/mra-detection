@@ -94,86 +94,6 @@ def sample_holdout_mask(missing_mask: torch.Tensor, ratio: float) -> torch.Tenso
     return holdout.view_as(missing_mask).float()
 
 
-class WarmStartFiller:
-    @staticmethod
-    def _directional_fill(
-        values: torch.Tensor,
-        missing_mask: torch.Tensor,
-        reverse: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if reverse:
-            values = torch.flip(values, dims=[1])
-            missing_mask = torch.flip(missing_mask, dims=[1])
-
-        observed = ~missing_mask.bool()
-        batch_size, time_steps, num_nodes = values.shape
-        filled = torch.zeros_like(values)
-        available = torch.zeros(
-            batch_size,
-            time_steps,
-            num_nodes,
-            device=values.device,
-            dtype=torch.bool,
-        )
-
-        last_value = torch.zeros(
-            batch_size,
-            num_nodes,
-            device=values.device,
-            dtype=values.dtype,
-        )
-        has_value = torch.zeros(
-            batch_size,
-            num_nodes,
-            device=values.device,
-            dtype=torch.bool,
-        )
-
-        for time_idx in range(time_steps):
-            current_observed = observed[:, time_idx, :]
-            current_value = values[:, time_idx, :]
-            last_value = torch.where(current_observed, current_value, last_value)
-            has_value = has_value | current_observed
-            available[:, time_idx, :] = has_value
-            filled[:, time_idx, :] = torch.where(
-                current_observed,
-                current_value,
-                torch.where(has_value, last_value, torch.zeros_like(last_value)),
-            )
-
-        if reverse:
-            filled = torch.flip(filled, dims=[1])
-            available = torch.flip(available, dims=[1])
-
-        return filled, available
-
-    @classmethod
-    def fill(cls, values: torch.Tensor, missing_mask: torch.Tensor) -> torch.Tensor:
-        observed = ~missing_mask.bool()
-        seed = torch.where(observed, values, torch.zeros_like(values))
-
-        forward_fill, forward_available = cls._directional_fill(
-            values,
-            missing_mask,
-            reverse=False,
-        )
-        backward_fill, backward_available = cls._directional_fill(
-            values,
-            missing_mask,
-            reverse=True,
-        )
-
-        missing = missing_mask.bool()
-        both = missing & forward_available & backward_available
-        forward_only = missing & forward_available & ~backward_available
-        backward_only = missing & ~forward_available & backward_available
-
-        seed = torch.where(both, 0.5 * (forward_fill + backward_fill), seed)
-        seed = torch.where(forward_only, forward_fill, seed)
-        seed = torch.where(backward_only, backward_fill, seed)
-        return seed
-
-
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 4096) -> None:
         super().__init__()
@@ -271,7 +191,7 @@ class TwoExpertGatedImputer(nn.Module):
         model_missing_mask: torch.Tensor,
         rate_id: torch.Tensor,
     ) -> dict[str, torch.Tensor | bool | None]:
-        x_seed = WarmStartFiller.fill(x_input, model_missing_mask)
+        x_seed = x_input
         adjacency: torch.Tensor | None = None
 
         if self.has_gcn and self.gcn is not None:

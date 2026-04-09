@@ -182,7 +182,7 @@ def sample_holdout_mask(missing_mask: torch.Tensor, ratio: float) -> torch.Tenso
     return holdout.view_as(missing_mask).float()
 
 
-class WarmStartFiller:
+class PreImpute:
     @staticmethod
     def _directional_fill(
         values: torch.Tensor,
@@ -301,7 +301,7 @@ class TwoExpertGatedImputer(nn.Module):
         model_missing_mask: torch.Tensor,
         rate_id: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        x_seed = WarmStartFiller.fill(x_input, model_missing_mask)
+        x_seed = PreImpute.fill(x_input, model_missing_mask)
         x_gcn, adjacency = self.gcn(x_seed, model_missing_mask)
         x_freq = self.freq(x_seed)
 

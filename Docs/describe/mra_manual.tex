@@ -1,0 +1,1310 @@
+% !TEX program = xelatex
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,tabularx,longtable,array,multirow}
+\usepackage[ruled,linesnumbered,vlined]{algorithm2e}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{float}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\setlist[itemize]{nosep,leftmargin=2em}
+\setlist[enumerate]{nosep,leftmargin=2em}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{2em}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\softplus}{softplus}
+\DeclareMathOperator{\RFFT}{RFFT}
+\DeclareMathOperator{\IRFFT}{IRFFT}
+\DeclareMathOperator{\sg}{sg}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  backgroundcolor=\color{gray!5}
+}
+
+\title{MRA 异常检测模型说明手册\\
+\large 基于 \texttt{mra.py} 的代码一致性科研式说明}
+\author{面向仓库 \texttt{/home/akira/codespace/mra-detection} 的源码分析文档}
+\date{2026年4月9日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文对仓库中的 \texttt{mra.py} 及其直接依赖模块
+\texttt{freq\_reconstruction.py}、
+\texttt{graph\_gcn\_reconstruction.py}、
+\texttt{utils/methods/windowing.py} 等进行逐函数分析，
+生成一份与代码实现严格对齐的中文 LaTeX 说明手册。
+文档重点回答四类问题：
+（1）频域插补模块的代码入口、训练入口与调用链；
+（2）联合训练流程、损失组成、梯度传播路径与参数更新过程；
+（3）由训练集得到的模型参数和统计量在测试阶段的具体作用；
+（4）从数据读入到异常分数输出的完整张量流、数学原理、设计思路与实现细节。
+
+本手册基于当前仓库默认数据和默认超参数进行验证：训练集和测试集均为
+$4100\times 18$ 的多速率序列，缺失率自动推断为三组采样步长
+$[1,3,5]$，对应的 \texttt{rate\_id} 为
+$[0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2]$。
+文档不仅描述“设计意图”，也明确指出按当前代码真实发生的行为，
+例如检测器损失虽然对目标序列使用了 \texttt{detach()}，但仍会沿
+\texttt{x\_complete} 这条输入路径向插补器回传梯度。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{问题定义与代码入口}
+
+\subsection{研究对象}
+
+\texttt{mra.py} 实现的是一个“插补 + 异常检测”联合框架，面向的输入是
+带结构性缺失的多变量多速率时间序列。
+记原始序列为
+\[
+\bm{X}\in\mathbb{R}^{T\times N},
+\qquad
+\bm{M}^{\mathrm{str}}\in\{0,1\}^{T\times N},
+\]
+其中 $M^{\mathrm{str}}_{t,n}=1$ 表示第 $n$ 个变量在时刻 $t$ 缺失。
+模型的目标包括两部分：
+\begin{enumerate}
+  \item 对缺失位置进行插补，得到完整序列 $\hat{\bm{X}}$；
+  \item 对测试窗口输出异常分数并给出二值异常预测。
+\end{enumerate}
+
+该实现不是单纯的补全网络，也不是单纯的检测网络，而是
+“双专家插补器 + 采样感知 Transformer 检测器”的串联结构：
+\[
+\text{结构缺失序列}
+\rightarrow
+\text{预填充}
+\rightarrow
+\text{GCN 专家 / 频域专家}
+\rightarrow
+\text{门控融合}
+\rightarrow
+\text{Transformer 重构检测}
+\rightarrow
+\text{多信号异常评分}.
+\]
+
+\subsection{主入口、训练入口与频域模块入口}
+
+\begin{table}[H]
+\centering
+\caption{与本手册最相关的源码入口}
+\begin{tabularx}{\textwidth}{@{}l C{1.8cm} C{1.4cm} Y@{}}
+\toprule
+函数或类方法 & 文件 & 起始行 & 作用 \\
+\midrule
+\texttt{main()} &
+\texttt{mra.py} &
+831 &
+主程序入口；负责读数据、构窗、推断采样率、训练模型、生成补全结果和异常分数。 \\
+\texttt{train\_model(...)} &
+\texttt{mra.py} &
+548 &
+联合训练入口；频域模块、GCN 模块、门控网络和检测器都在这里一起优化。 \\
+\texttt{FusionAnomalyModel.forward(...)} &
+\texttt{mra.py} &
+492 &
+统一前向传播入口；先做插补，再送入检测器。 \\
+\texttt{TwoExpertGatedImputer.forward(...)} &
+\texttt{mra.py} &
+298 &
+双专家插补器入口；内部先调 GCN 专家，再调频域专家，再做门控融合。 \\
+\texttt{FrequencyOnlyReconstructor.forward(...)} &
+\texttt{freq\_reconstruction.py} &
+139 &
+频域专家的直接入口；先做 FFT 频谱增强，再做时域输出头修正。 \\
+\texttt{FrequencyImputer.forward(...)} &
+\texttt{freq\_reconstruction.py} &
+111 &
+频域增强核心实现；完成 \texttt{permute}、\texttt{rfft}、频率注意力、频谱增量和 \texttt{irfft}。 \\
+\texttt{train\_model(...)} &
+\texttt{freq\_reconstruction.py} &
+153 &
+独立频域重建实验的训练入口；它存在，但\textbf{不被} \texttt{mra.py} 调用。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{从主程序到频域插补模块的真实调用链}
+
+\begin{lstlisting}
+main()
+  -> train_model()
+    -> model(...)
+      -> FusionAnomalyModel.forward()
+        -> TwoExpertGatedImputer.forward()
+          -> PreImpute.fill()
+          -> GraphGCNReconstructor.forward()
+          -> FrequencyOnlyReconstructor.forward()
+            -> FrequencyImputer.forward()
+        -> SamplingAwareTransformerAD.forward()
+    -> compute_losses()
+    -> total_loss.backward()
+    -> clip_grad_norm_(..., max_norm=1.0)
+    -> AdamW.step()
+\end{lstlisting}
+
+因此，对“频域插补模块的训练入口”必须区分两种语义：
+\begin{itemize}
+  \item 在 \texttt{mra.py} 主方法中，频域模块\textbf{不是单独训练}，
+  而是作为 \texttt{FusionAnomalyModel} 的子模块，
+  通过 \texttt{mra.py::train\_model()} 与其他模块联合训练。
+  \item 在 \texttt{freq\_reconstruction.py} 中确实存在一个独立的
+  \texttt{train\_model()}，但那是频域重建的单模块实验脚本，
+  并不参与 \texttt{mra.py} 的主流程。
+\end{itemize}
+
+\section{数据、缺失结构与多速率元数据}
+
+\subsection{默认数据规模}
+
+根据当前仓库中的默认数据文件：
+\begin{itemize}
+  \item \texttt{data/train/train\_1.csv}: $(4100,18)$；
+  \item \texttt{data/test/test\_C5\_1.csv}: $(4100,18)$；
+  \item \texttt{data/val/val\_1.csv}: $(1000,18)$。
+\end{itemize}
+
+第 1--6 列无缺失，第 7--12 列缺失率约为 $0.6666$，
+第 13--18 列缺失率约为 $0.8$。
+代码中的 \texttt{infer\_rate\_metadata()} 根据缺失率推断：
+\[
+\texttt{stride}=[1,1,1,1,1,1,3,3,3,3,3,3,5,5,5,5,5,5].
+\]
+再将不同步长映射到离散分组，得到
+\[
+\texttt{rate\_id}=[0,0,0,0,0,0,1,1,1,1,1,1,2,2,2,2,2,2].
+\]
+
+\begin{table}[H]
+\centering
+\caption{默认数据的多速率结构}
+\begin{tabular}{@{}cccc@{}}
+\toprule
+变量索引 & 缺失率 & 推断采样步长 \texttt{stride} & 分组 \texttt{rate\_id} \\
+\midrule
+1--6 & 0.0 & 1 & 0 \\
+7--12 & 0.6666\ (\text{约 }2/3) & 3 & 1 \\
+13--18 & 0.8\ (\text{约 }4/5) & 5 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{数据读取与缺失掩码}
+
+\texttt{load\_csv\_glob\_with\_mask()} 将 CSV 读为实数矩阵并同步构造缺失掩码：
+\[
+\bm{X}_{\mathrm{raw}}\in\mathbb{R}^{T\times N},
+\qquad
+\bm{M}^{\mathrm{str}}=\mathbf{1}[\mathrm{NaN}(\bm{X}_{\mathrm{raw}})].
+\]
+所有文件都按行拼接，列数必须一致，否则抛错。
+
+\subsection{仅基于观测值的标准化}
+
+\texttt{ObservedStandardScaler} 的核心思想是：
+均值和标准差只由“真实观测值”估计，而不是由填充值估计。
+对第 $n$ 个变量，记观测时刻集合为
+\[
+\mathcal{O}_n=\{t\mid M^{\mathrm{str}}_{t,n}=0\},
+\]
+则
+\[
+\mu_n=\frac{1}{|\mathcal{O}_n|}\sum_{t\in\mathcal{O}_n}X_{t,n},
+\qquad
+\sigma_n=\max\!\left(
+\sqrt{\frac{1}{|\mathcal{O}_n|}\sum_{t\in\mathcal{O}_n}(X_{t,n}-\mu_n)^2},
+10^{-6}
+\right).
+\]
+标准化时先把缺失值替换为列均值，再做
+\[
+\tilde{X}_{t,n}=\frac{X^{\mathrm{filled}}_{t,n}-\mu_n}{\sigma_n}.
+\]
+因此，缺失位置在标准化后恰好变成 0，这与后续
+\texttt{masked\_fill(..., 0.0)} 的输入约定是一致的。
+
+\subsection{窗口构造方式与实际数量}
+
+\texttt{mra.py} 同时构造三类窗口：
+\begin{enumerate}
+  \item \textbf{训练插补窗口}
+  \texttt{build\_windows()}：
+  从序列起点开始逐步构造，若历史不足则用首行做前端补齐；
+  默认得到 $(4100,50,18)$。
+  \item \textbf{训练评分窗口}
+  \texttt{build\_standard\_windows()}：
+  只使用有完整 $50$ 步历史的窗口，
+  默认起始索引为 99，得到 $(4001,50,18)$。
+  \item \textbf{测试评分窗口}
+  \texttt{build\_prompt\_test\_windows()}：
+  默认只取 4000 个窗口，并用固定分界点 2000 生成标签，
+  得到窗口 $(4000,50,18)$、标签 $(4000,)$。
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\caption{默认窗口规模}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+窗口类型 & 张量形状 & 备注 \\
+\midrule
+训练插补窗口 & $(4100,50,18)$ & 与原始时间步一一对应，前端允许补齐 \\
+测试插补窗口 & $(4100,50,18)$ & 用于输出 \texttt{test\_completed.csv} \\
+训练评分窗口 & $(4001,50,18)$ & 不做前端补齐 \\
+测试评分窗口 & $(4000,50,18)$ & 对应 2000 正常 + 2000 异常标签 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{双专家插补器的设计与实现}
+
+\subsection{预填充 \texttt{PreImpute.fill}}
+
+\texttt{PreImpute} 是插补器前的暖启动步骤，其输入为
+\[
+\bm{X}_{\mathrm{input}}\in\mathbb{R}^{B\times L\times N},
+\qquad
+\bm{M}^{\mathrm{model}}\in\{0,1\}^{B\times L\times N}.
+\]
+这里的 \texttt{model\_missing\_mask} 可能同时包含结构性缺失和训练期的随机遮挡。
+
+预填充分两次一维扫描完成：
+\begin{itemize}
+  \item 正向扫描：对每个变量沿时间轴维护最近一次可见值；
+  \item 反向扫描：在倒序时间上重复同样操作。
+\end{itemize}
+
+设 $x_{t,n}^{\rightarrow}$ 和 $x_{t,n}^{\leftarrow}$ 分别表示前向与后向可获得的最近观测值，
+则最终种子值为
+\[
+x^{\mathrm{seed}}_{t,n}=
+\begin{cases}
+x_{t,n}, & M^{\mathrm{model}}_{t,n}=0,\\
+\frac{x^{\rightarrow}_{t,n}+x^{\leftarrow}_{t,n}}{2}, &
+\text{前后都可用},\\
+x^{\rightarrow}_{t,n}, & \text{仅前向可用},\\
+x^{\leftarrow}_{t,n}, & \text{仅后向可用},\\
+0, & \text{前后都不可用}.
+\end{cases}
+\]
+
+这样做的动机很直接：频域模块无法直接处理稀疏掩码，GCN 虽然能显式看掩码，
+但如果输入全是 0，会放大“缺失即 0”的伪信号，因此先构造一个时域上平滑、
+数值上合理的稠密种子序列。
+
+\subsection{频域专家：\texttt{FrequencyOnlyReconstructor}}
+
+\subsubsection{代码入口与模块组成}
+
+在主流程中，频域专家的入口是：
+\[
+\texttt{TwoExpertGatedImputer.forward}
+\rightarrow
+\texttt{self.freq(x\_seed)}
+\rightarrow
+\texttt{FrequencyOnlyReconstructor.forward}
+\rightarrow
+\texttt{FrequencyImputer.forward}.
+\]
+
+\texttt{FrequencyOnlyReconstructor} 由两层组成：
+\begin{enumerate}
+  \item \texttt{FrequencyImputer}：在频谱空间做选择性增强；
+  \item \texttt{output\_head}：在时域上做跨变量修正。
+\end{enumerate}
+
+\subsubsection{数学原理}
+
+设输入为预填充后的窗口
+\[
+\bm{X}_{\mathrm{seed}}\in\mathbb{R}^{B\times L\times N}.
+\]
+代码先把时间维挪到最后一维：
+\[
+\bm{X}^{\top}\in\mathbb{R}^{B\times N\times L}.
+\]
+随后对每个变量的长度为 $L$ 的时间序列执行实数 FFT：
+\[
+\bm{F}=\RFFT(\bm{X}^{\top},\mathrm{dim}=2)\in\mathbb{C}^{B\times N\times K},
+\qquad
+K=\left\lfloor\frac{L}{2}\right\rfloor+1.
+\]
+默认 $L=50$，因此 $K=26$。
+
+将复频谱拆成实部和虚部后拼接：
+\[
+\bm{f}=[\Re(\bm{F})\ \|\ \Im(\bm{F})]\in\mathbb{R}^{B\times N\times 2K}.
+\]
+
+然后有两条并行支路：
+\begin{align}
+\bm{a} &= \sigma\!\left(\mathrm{MLP}_{\mathrm{att}}(\bm{f})\right)
+\in (0,1)^{B\times N\times K}, \\
+[\Delta \bm{r}\ \|\ \Delta \bm{i}] &=
+\mathrm{MLP}_{\mathrm{enh}}(\bm{f})
+\in \mathbb{R}^{B\times N\times 2K}.
+\end{align}
+其中 $\bm{a}$ 是每个频率点的自适应权重，
+$\Delta \bm{r}$、$\Delta \bm{i}$ 分别是对实部和虚部的可学习增量。
+
+增强后的频谱写成
+\[
+\tilde{\bm{F}}
+=
+\bm{F}
++
+\left(\bm{a}\odot \Delta \bm{r}\right)
++
+j\left(\bm{a}\odot \Delta \bm{i}\right).
+\]
+最后执行逆变换：
+\[
+\tilde{\bm{X}}^{\top}=\IRFFT(\tilde{\bm{F}},n=L,\mathrm{dim}=2)
+\in\mathbb{R}^{B\times N\times L},
+\]
+再转回
+\[
+\tilde{\bm{X}}\in\mathbb{R}^{B\times L\times N}.
+\]
+
+\subsubsection{为什么频域分支能工作}
+
+频域分支的建模假设是：
+多速率工业信号虽然存在缺失，但在\textbf{时间轴上仍然保留周期性、
+谐波结构和低频趋势}。
+相比时域逐点预测，频谱增强有三个优点：
+\begin{enumerate}
+  \item 周期成分在频域更稀疏，易于被一个小 MLP 选择性放大或抑制；
+  \item FFT 的感受野天然覆盖整个窗口，适合捕捉长程时序模式；
+  \item 当预填充已经提供粗糙但连续的种子时，
+  频域网络更像是在做“全局频谱校正”而不是从零生成。
+\end{enumerate}
+
+但当前实现也有一个必须明确的约束：
+\texttt{FrequencyImputer} \textbf{不直接读取掩码}，
+它只看 \texttt{x\_seed}。
+也就是说，缺失信息对频域分支的影响主要来自预填充结果，
+以及后续门控网络对 \texttt{model\_missing\_mask} 的显式感知。
+
+\subsubsection{输出头的作用}
+
+\texttt{FrequencyOnlyReconstructor.forward} 在频域输出后又做了一层时域残差修正：
+\[
+\bm{X}_{\mathrm{freq}}
+=
+\tilde{\bm{X}} + \mathrm{MLP}_{\mathrm{out}}(\tilde{\bm{X}}).
+\]
+这里的 \texttt{Linear(num\_features, num\_features)} 是沿最后一维作用，
+因此它在每个时间步做\textbf{跨变量混合}。
+这一步弥补了频谱增强阶段“主要对单变量时间轨迹建模”的不足，
+把变量间耦合信息补回来。
+
+\subsubsection{张量形状追踪}
+
+\begin{table}[H]
+\centering
+\caption{频域专家内部张量形状}
+\begin{tabular}{@{}lll@{}}
+\toprule
+变量名 & 一般形状 & 默认 $L{=}50,N{=}18$ 时的末维 \\
+\midrule
+\texttt{x\_seed} & $(B,L,N)$ & $(B,50,18)$ \\
+\texttt{x\_perm} & $(B,N,L)$ & $(B,18,50)$ \\
+\texttt{xf} & $(B,N,K)$（复数） & $(B,18,26)$ \\
+\texttt{feat} & $(B,N,2K)$ & $(B,18,52)$ \\
+\texttt{att\_weights} & $(B,N,K)$ & $(B,18,26)$ \\
+\texttt{feat\_enhanced} & $(B,N,2K)$ & $(B,18,52)$ \\
+\texttt{x\_rec} & $(B,L,N)$ & $(B,50,18)$ \\
+\texttt{x\_freq} & $(B,L,N)$ & $(B,50,18)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{图专家：\texttt{GraphGCNReconstructor}}
+
+\subsubsection{图学习器 \texttt{GraphLearner}}
+
+图专家的输入是 \texttt{x\_seed} 和 \texttt{model\_missing\_mask}。
+与频域专家不同，图专家显式使用掩码。
+对每个变量 $n$，\texttt{GraphLearner} 从窗口内提取四类动态统计量：
+\[
+\bm{c}^{\mathrm{dyn}}_n=
+\big[
+\mathrm{mean}_n,\,
+\mathrm{std}_n,\,
+\mathrm{last}_n,\,
+\mathrm{missing\_ratio}_n
+\big]\in\mathbb{R}^{4}.
+\]
+再拼接可学习静态上下文
+\[
+\bm{c}^{\mathrm{static}}_n\in\mathbb{R}^{8},
+\]
+输入节点编码 MLP，得到
+\[
+\bm{h}_n\in\mathbb{R}^{d_g}.
+\]
+
+对每一对节点 $(i,j)$，代码构造四类配对特征
+\[
+[\bm{h}_i,\ \bm{h}_j,\ |\bm{h}_i-\bm{h}_j|,\ \bm{h}_i\odot \bm{h}_j],
+\]
+送入边 MLP 得到 \texttt{edge\_logits}。
+此外还引入两种辅助图结构信息：
+\begin{itemize}
+  \item 基于可学习坐标的距离先验
+  $p_{ij}=1/(1+\|\bm{p}_i-\bm{p}_j\|_2)$；
+  \item 归一化节点表征之间的余弦相似度。
+\end{itemize}
+
+因此，最终邻接 logit 为
+\[
+\ell_{ij}
+=
+e_{ij}
++
+\softplus(\alpha_p)\,p_{ij}
++
+\softplus(\alpha_s)\,\cos(\bm{h}_i,\bm{h}_j).
+\]
+对角线单独加上可学习自环 logit，
+再执行带温度的 \texttt{softmax}、对称化和行归一化，得到
+\[
+\bm{A}\in\mathbb{R}^{B\times N\times N}.
+\]
+
+\subsubsection{GCN 重构}
+
+学到邻接矩阵后，\texttt{GraphGCNReconstructor} 做三层图卷积：
+\begin{align}
+\bm{H}^{(0)} &= \bm{X}_{\mathrm{seed}}\in\mathbb{R}^{B\times L\times N},\\
+\bm{H}^{(1)} &= \mathrm{Dropout}\!\left(
+\mathrm{LayerNorm}\!\left(
+\mathrm{ReLU}(\mathrm{GCN}_{\mathrm{in}}(\bm{H}^{(0)},\bm{A}))
+\right)\right),\\
+\bm{H}^{(2)} &= \mathrm{Dropout}\!\left(
+\mathrm{LayerNorm}\!\left(
+\mathrm{ReLU}(\mathrm{GCN}_{\mathrm{mid}}(\bm{H}^{(1)},\bm{A}))
+\right)\right),\\
+\bm{X}_{\mathrm{gcn}} &= \mathrm{GCN}_{\mathrm{out}}(\bm{H}^{(2)},\bm{A}).
+\end{align}
+
+其中单层 GCN 的消息传递在代码中写作
+\[
+\texttt{einsum("bnm,bsmd->bsnd", adj, x)},
+\]
+其含义是：
+对每个时间步 $s$，按邻接矩阵在“节点维”上做加权聚合，
+而不是在时间维上做卷积。
+
+\subsection{门控融合：\texttt{TwoExpertGatedImputer}}
+
+\subsubsection{门控特征}
+
+门控网络把以下 6 组标量特征沿最后一维堆叠：
+\[
+\big[
+x_{\mathrm{seed}},
+M^{\mathrm{model}},
+x_{\mathrm{gcn}},
+x_{\mathrm{freq}},
+x_{\mathrm{gcn}}-x_{\mathrm{seed}},
+x_{\mathrm{freq}}-x_{\mathrm{seed}}
+\big],
+\]
+得到
+\[
+\bm{G}_{\mathrm{base}}\in\mathbb{R}^{B\times L\times N\times 6}.
+\]
+然后追加采样率嵌入
+\[
+\bm{e}_{r_n}\in\mathbb{R}^{d_r},
+\]
+广播后与之拼接，形成
+\[
+\bm{G}\in\mathbb{R}^{B\times L\times N\times (6+d_r)}.
+\]
+默认 $d_r=8$，因此门控输入最后一维为 14。
+
+\subsubsection{融合公式}
+
+门控 MLP 输出两个 logit，对应 GCN 与频域两个专家：
+\[
+\bm{\alpha}_{t,n}
+=
+\softmax(\mathrm{MLP}_{\mathrm{gate}}(\bm{g}_{t,n}))
+\in\mathbb{R}^{2}.
+\]
+融合结果为
+\[
+x^{\mathrm{imputed}}_{t,n}
+=
+\alpha^{(\mathrm{gcn})}_{t,n}x^{\mathrm{gcn}}_{t,n}
++
+\alpha^{(\mathrm{freq})}_{t,n}x^{\mathrm{freq}}_{t,n}.
+\]
+仅在缺失位置采用融合值：
+\[
+x^{\mathrm{complete}}_{t,n}
+=
+\begin{cases}
+x^{\mathrm{input}}_{t,n}, & M^{\mathrm{model}}_{t,n}=0,\\
+x^{\mathrm{imputed}}_{t,n}, & M^{\mathrm{model}}_{t,n}=1.
+\end{cases}
+\]
+
+因此，门控器承担两层职责：
+\begin{enumerate}
+  \item 在缺失位置决定“空间相关性更可信”还是“频域周期性更可信”；
+  \item 在训练时根据 \texttt{holdout} 造成的人为遮挡学习这种决策。
+\end{enumerate}
+
+\subsection{插补器输出字典}
+
+\begin{table}[H]
+\centering
+\caption{双专家插补器 \texttt{outputs} 的主要键值}
+\begin{tabular}{@{}lll@{}}
+\toprule
+键名 & 形状 & 含义 \\
+\midrule
+\texttt{x\_seed} & $(B,L,N)$ & 预填充结果 \\
+\texttt{x\_gcn} & $(B,L,N)$ & GCN 专家输出 \\
+\texttt{x\_freq} & $(B,L,N)$ & 频域专家输出 \\
+\texttt{x\_imputed} & $(B,L,N)$ & 两专家加权融合值 \\
+\texttt{x\_complete} & $(B,L,N)$ & 观测值保留、缺失值补全后的序列 \\
+\texttt{gate\_weights} & $(B,L,N,2)$ & 两专家门控权重 \\
+\texttt{adjacency} & $(B,N,N)$ & 当前批次自适应邻接矩阵 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{采样感知 Transformer 检测器}
+
+\subsection{输入定义}
+
+\texttt{SamplingAwareTransformerAD} 的输入不是原始缺失序列，而是
+\texttt{x\_complete}。此外还需要两类元信息：
+\begin{itemize}
+  \item \texttt{observed\_mask} $= 1-\texttt{structural\_missing\_mask}$；
+  \item 每个变量对应的 \texttt{rate\_id} 和 \texttt{stride}。
+\end{itemize}
+
+\subsection{每变量表示构造}
+
+对每个时间步 $t$、变量 $n$，代码拼接五类信息：
+\[
+\bm{v}_{t,n}
+=
+\big[
+x^{\mathrm{complete}}_{t,n},
+o_{t,n},
+\bm{e}^{\mathrm{var}}_n,
+\bm{e}^{\mathrm{rate}}_{r_n},
+\bm{e}^{\mathrm{phase}}_{t,n}
+\big].
+\]
+其中
+\begin{itemize}
+  \item $x^{\mathrm{complete}}_{t,n}$ 是补全值；
+  \item $o_{t,n}$ 是结构观测标记；
+  \item $\bm{e}^{\mathrm{var}}_n\in\mathbb{R}^{8}$ 是变量嵌入；
+  \item $\bm{e}^{\mathrm{rate}}_{r_n}\in\mathbb{R}^{8}$ 是采样率嵌入；
+  \item 相位特征定义为
+  \[
+  \phi_{t,n}=\frac{t\bmod s_n}{s_n}\in[0,1),
+  \qquad
+  \bm{e}^{\mathrm{phase}}_{t,n}
+  =
+  \mathrm{MLP}_{\mathrm{phase}}(\phi_{t,n}).
+  \]
+\end{itemize}
+
+默认 \texttt{phase\_dim}=8，因此每变量输入维度为
+\[
+1+1+8+8+8=26.
+\]
+
+\subsection{Token 化与编码}
+
+每变量输入经过 \texttt{per\_variable\_proj} 映射到
+\[
+d_v=\max(d/8,8)
+\]
+维。默认 \texttt{detector\_d\_model}=128，因此 $d_v=16$。
+
+对每个时间步，把所有变量的三类信息拼成单个 token：
+\[
+\bm{z}_t=
+\big[
+\bm{x}^{\mathrm{complete}}_{t,:},
+\bm{o}_{t,:},
+\mathrm{reshape}(\bm{u}_{t,:})
+\big]
+\in\mathbb{R}^{2N+Nd_v}.
+\]
+在默认 $N=18,d_v=16$ 下，
+\[
+2N+Nd_v=2\times 18 + 18\times 16 = 324.
+\]
+再用 \texttt{token\_proj} 投影到 $d=128$ 维，
+叠加标准正弦位置编码后进入 Transformer Encoder。
+
+\subsection{重构输出}
+
+编码器输出经 \texttt{reconstruction\_head} 生成增量
+\[
+\bm{\Delta}\in\mathbb{R}^{B\times L\times N},
+\]
+最终输出为
+\[
+\bm{X}_{\mathrm{det}}
+=
+\bm{X}_{\mathrm{complete}}+\bm{\Delta}.
+\]
+代码还保存逐元素绝对误差
+\[
+\bm{E}=|\bm{X}_{\mathrm{det}}-\bm{X}_{\mathrm{complete}}|.
+\]
+
+这意味着检测器不是从零生成一个新序列，
+而是在补全序列上学习一个“残差偏移”。
+正常训练数据上，较理想的状态是 $\bm{\Delta}$ 小；
+异常窗口上，$\bm{\Delta}$ 往往变大。
+
+\section{联合训练流程与参数更新机制}
+
+\subsection{训练期的三类掩码}
+
+训练循环每次从 DataLoader 取出
+\[
+\bm{X}_{\mathrm{true}},\ \bm{M}^{\mathrm{str}}
+\in\mathbb{R}^{B\times L\times N}.
+\]
+随后通过 \texttt{sample\_holdout\_mask()}，
+在\textbf{原本可观测的位置}上随机制造一层额外遮挡：
+\[
+\bm{M}^{\mathrm{hold}}\in\{0,1\}^{B\times L\times N}.
+\]
+模型实际看到的掩码为
+\[
+\bm{M}^{\mathrm{model}}
+=
+\max(\bm{M}^{\mathrm{str}},\bm{M}^{\mathrm{hold}}).
+\]
+输入张量是
+\[
+\bm{X}_{\mathrm{input}}
+=
+\bm{X}_{\mathrm{true}}\odot(1-\bm{M}^{\mathrm{model}}).
+\]
+
+这个设计的意义是：
+\begin{itemize}
+  \item 原始结构缺失保持不变；
+  \item 额外随机遮挡为插补器制造监督目标；
+  \item 至少保证每个 batch 样本若存在观测值，则会有至少一个点被 holdout。
+\end{itemize}
+
+\subsection{损失函数}
+
+公共的掩码 MSE 定义为
+\[
+\mathcal{L}_{\mathrm{mask}}(\hat{\bm{X}},\bm{X},\bm{M})
+=
+\frac{\sum_{b,t,n}\big((\hat{X}_{b,t,n}-X_{b,t,n})M_{b,t,n}\big)^2}
+{\max\left(\sum_{b,t,n}M_{b,t,n},1\right)}.
+\]
+
+当前代码中的五项损失是
+\begin{align}
+\mathcal{L}_{\mathrm{fusion}}
+&=
+\mathcal{L}_{\mathrm{mask}}
+(\bm{X}_{\mathrm{imputed}},\bm{X}_{\mathrm{true}},\bm{M}^{\mathrm{hold}}),\\
+\mathcal{L}_{\mathrm{gcn}}
+&=
+\mathcal{L}_{\mathrm{mask}}
+(\bm{X}_{\mathrm{gcn}},\bm{X}_{\mathrm{true}},\bm{M}^{\mathrm{hold}}),\\
+\mathcal{L}_{\mathrm{freq}}
+&=
+\mathcal{L}_{\mathrm{mask}}
+(\bm{X}_{\mathrm{freq}},\bm{X}_{\mathrm{true}},\bm{M}^{\mathrm{hold}}),\\
+\mathcal{L}_{\mathrm{graph}}
+&=
+\frac{1}{BN}\sum_{b,n}(A_{b,n,n}-\tau_{\mathrm{diag}})^2,\\
+\mathcal{L}_{\mathrm{det}}
+&=
+\mathcal{L}_{\mathrm{mask}}
+\big(
+\bm{X}_{\mathrm{det}},
+\sg(\bm{X}_{\mathrm{complete}}),
+1-\bm{M}^{\mathrm{str}}
+\big).
+\end{align}
+
+总损失为
+\[
+\mathcal{L}
+=
+1.0\,\mathcal{L}_{\mathrm{fusion}}
++
+0.4\,\mathcal{L}_{\mathrm{gcn}}
++
+0.4\,\mathcal{L}_{\mathrm{freq}}
++
+0.5\,\mathcal{L}_{\mathrm{det}}
++
+0.1\,\mathcal{L}_{\mathrm{graph}}.
+\]
+
+\subsection{参数分组}
+
+为了说明“谁被什么损失更新”，把参数粗分为四组：
+\begin{align}
+\theta_G &: \text{GraphLearner 与三层 GCN 的参数},\\
+\theta_F &: \text{频域模块 \texttt{attention}、\texttt{freq\_enhance}、\texttt{output\_head}},\\
+\theta_M &: \text{门控 MLP 与插补器中的 \texttt{rate\_embedding}},\\
+\theta_D &: \text{检测器全部参数}.
+\end{align}
+
+\subsection{梯度路由：代码真实发生的更新关系}
+
+\begin{table}[H]
+\centering
+\caption{各损失项实际更新哪些参数}
+\begin{tabularx}{\textwidth}{@{}l Y Y@{}}
+\toprule
+损失项 & 直接依赖的中间量 & 会被更新的参数 \\
+\midrule
+$\mathcal{L}_{\mathrm{fusion}}$ &
+\texttt{x\_imputed} &
+$\theta_G,\theta_F,\theta_M$ \\
+$\mathcal{L}_{\mathrm{gcn}}$ &
+\texttt{x\_gcn} &
+$\theta_G$ \\
+$\mathcal{L}_{\mathrm{freq}}$ &
+\texttt{x\_freq} &
+$\theta_F$ \\
+$\mathcal{L}_{\mathrm{graph}}$ &
+\texttt{adjacency} &
+仅 GraphLearner 中生成邻接矩阵的参数，属于 $\theta_G$ 的子集 \\
+$\mathcal{L}_{\mathrm{det}}$ &
+\texttt{detector(outputs["x\_complete"])} &
+$\theta_D$，以及所有会影响 \texttt{x\_complete} 的插补器参数，即 $\theta_G,\theta_F,\theta_M$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{关键说明 1：\texttt{detach()} 并没有把检测器和插补器完全隔离。}
+当前代码中
+\[
+\texttt{detector\_target = outputs["x\_complete"].detach()}
+\]
+只对\textbf{目标分支}停止梯度，但检测器前向仍然是
+\[
+\texttt{self.detector(outputs["x\_complete"], ...)}.
+\]
+因此 $\mathcal{L}_{\mathrm{det}}$ 依然会沿
+\texttt{detector\_reconstruction -> detector -> x\_complete}
+这条路径回传到插补器。
+在本仓库默认配置下，对 \texttt{detector\_loss} 单独做反向传播时，
+GCN、频域、门控、采样率嵌入和检测器参数都会得到非零梯度。
+
+\paragraph{关键说明 2：检测器训练目标包含 holdout 位置的“伪观测”。}
+\texttt{detector\_loss} 使用的掩码是
+\[
+1-\bm{M}^{\mathrm{str}},
+\]
+而不是
+\[
+1-\bm{M}^{\mathrm{model}}.
+\]
+所以在训练时，人为 holdout 的位置仍被当作“观测位置”参与检测器损失；
+但这些位置的目标值已经不是原始真值，而是
+\texttt{x\_complete.detach()} 中的插补结果。
+换言之，检测器在这部分位置上学习的是“重构插补器输出”，而不是“重构原始观测值”。
+
+\subsection{参数更新公式}
+
+优化器为 AdamW，代码顺序为：
+\begin{enumerate}
+  \item \texttt{optimizer.zero\_grad()}
+  \item \texttt{loss.backward()}
+  \item \texttt{clip\_grad\_norm\_(..., max\_norm=1.0)}
+  \item \texttt{optimizer.step()}
+\end{enumerate}
+
+若将裁剪后的梯度记为 $\hat{\bm{g}}_t$，则 AdamW 的参数更新可写作
+\begin{align}
+\bm{m}_t &= \beta_1\bm{m}_{t-1} + (1-\beta_1)\hat{\bm{g}}_t,\\
+\bm{v}_t &= \beta_2\bm{v}_{t-1} + (1-\beta_2)\hat{\bm{g}}_t^{\odot 2},\\
+\theta_t &=
+\theta_{t-1}
+-\eta
+\frac{\bm{m}_t/(1-\beta_1^t)}
+{\sqrt{\bm{v}_t/(1-\beta_2^t)}+\epsilon}
+-\eta\lambda \theta_{t-1}.
+\end{align}
+其中默认超参数是
+\[
+\eta=10^{-3},\qquad \lambda=10^{-4}.
+\]
+
+\subsection{训练伪代码}
+
+\begin{lstlisting}
+for epoch in range(E):
+    for x_true, structural_missing_mask in loader:
+        holdout_mask = sample_holdout_mask(structural_missing_mask, holdout_ratio)
+        model_missing_mask = max(structural_missing_mask, holdout_mask)
+        x_input = x_true * (1 - model_missing_mask)
+
+        outputs = model(
+            x_input,
+            model_missing_mask,
+            structural_missing_mask,
+            rate_id,
+            stride,
+        )
+        losses = compute_losses(outputs, ...)
+        total_loss = weighted_sum(losses)
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+\end{lstlisting}
+
+\section{训练集派生量在测试阶段的作用}
+
+\subsection{需要区分两类“参数”}
+
+用户提出“训练集更新的参数和在测试集中的作用”，在当前代码里至少包含两种不同来源：
+\begin{enumerate}
+  \item \textbf{通过梯度下降学到的模型参数}：
+  例如 GCN 权重、频域 MLP、门控网络、Transformer 权重；
+  \item \textbf{由训练集统计估计得到的非梯度量}：
+  例如标准化均值方差、\texttt{rate\_id}/\texttt{stride}、阈值、分数归一化统计量。
+\end{enumerate}
+
+\subsection{梯度学习得到的参数}
+
+\begin{table}[H]
+\centering
+\caption{模型参数在测试阶段的具体作用}
+\begin{tabularx}{\textwidth}{@{}l Y@{}}
+\toprule
+参数组 & 在测试阶段的作用 \\
+\midrule
+GraphLearner 参数 &
+根据测试窗口的统计特征动态生成邻接矩阵，决定节点间如何传播信息。 \\
+GCN 参数 &
+沿邻接图把其他变量的信息聚合到当前变量，用于补全缺失值。 \\
+频域模块参数 &
+对测试窗口执行 FFT 频谱增强，恢复周期、趋势和谐波结构。 \\
+门控网络参数 &
+根据当前位置的缺失状态、两个专家的输出及采样率嵌入，自适应分配 GCN/频域权重。 \\
+插补器中的 \texttt{rate\_embedding} &
+把采样率分组编码成向量，影响门控决策。 \\
+检测器中的变量嵌入、采样率嵌入、相位 MLP &
+让 Transformer 区分“不同变量”“不同采样率”和“周期内不同相位”的正常模式。 \\
+Transformer Encoder 与重构头 &
+对补全后的测试序列做重构；偏离训练正常模式的窗口会产生更大的重构误差。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{由训练集估计的非梯度量}
+
+\begin{table}[H]
+\centering
+\caption{训练集派生统计量及其测试作用}
+\begin{tabularx}{\textwidth}{@{}l Y Y@{}}
+\toprule
+统计量 & 训练阶段如何得到 & 测试阶段如何使用 \\
+\midrule
+\texttt{scaler.mean\_}, \texttt{scaler.scale\_} &
+对训练集真实观测值逐列估计均值和标准差 &
+用于把测试集映射到与训练集相同的标准化坐标系；输出补全结果时再逆变换。 \\
+\texttt{rate\_id}, \texttt{stride} &
+根据训练集缺失率推断不同采样步长与采样率组 &
+作为门控网络和检测器的元信息输入；当前实现默认直接沿用于测试集。 \\
+训练分数均值/标准差 &
+\texttt{normalize\_scores()} 对训练分数求均值和标准差 &
+用于把测试分数做 Z-score 标准化，保证 train/test 在同一评分尺度。 \\
+训练分布偏移特征均值/标准差 &
+\texttt{compute\_distribution\_shift\_scores()} 对训练补全窗口统计特征做估计 &
+衡量测试补全窗口离训练分布有多远。 \\
+阈值 $\theta$ &
+由平滑后的训练分数通过“高斯阈值与分位数阈值取大”得到 &
+用于把测试异常分数转换为二值预测。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{一个实现上的现实问题。}
+\texttt{model.pt} 保存了模型参数、\texttt{rate\_id}、\texttt{stride} 和损失权重，
+但\textbf{没有保存} \texttt{ObservedStandardScaler} 的均值方差，
+也没有保存用于 \texttt{normalize\_scores()} 和
+\texttt{compute\_distribution\_shift\_scores()} 的全部训练统计量。
+因此，如果未来要把 \texttt{model.pt} 单独拿出来做部署，
+还需要额外保存或重建这些训练集统计量。
+
+\section{测试推理、序列补全与异常评分}
+
+\subsection{序列补全}
+
+\texttt{reconstruct\_full\_sequence()} 在测试阶段使用
+\[
+\bm{M}^{\mathrm{model}}=\bm{M}^{\mathrm{str}},
+\]
+即不再注入 holdout。
+函数对所有插补窗口逐批前向传播，但只取每个窗口的最后一个时间步：
+\[
+\hat{\bm{x}}_i
+=
+\bm{X}^{\mathrm{complete}}_{i,L-1,:}\in\mathbb{R}^{N}.
+\]
+由于训练和测试插补窗口都是 $(4100,50,18)$，
+最终拼接后会得到长度正好为 4100 的补全序列，
+并保存为 \texttt{train\_completed.csv} 与 \texttt{test\_completed.csv}。
+
+\subsection{窗口统计量收集}
+
+\texttt{collect\_window\_statistics()} 对评分窗口收集三种统计量：
+\begin{enumerate}
+  \item 检测器重构误差分数
+  \[
+  s^{\mathrm{det}}_i
+  =
+  \frac{\sum_{t,n}
+  \big((X^{\mathrm{det}}_{i,t,n}-X^{\mathrm{complete}}_{i,t,n})\,O_{i,t,n}\big)^2}
+  {\max(\sum_{t,n}O_{i,t,n},1)};
+  \]
+  \item 专家分歧度
+  \[
+  s^{\mathrm{dis}}_i
+  =
+  \frac{1}{LN}\sum_{t,n}|x^{\mathrm{gcn}}_{i,t,n}-x^{\mathrm{freq}}_{i,t,n}|;
+  \]
+  \item 门控熵
+  \[
+  s^{\mathrm{ent}}_i
+  =
+  -\frac{1}{LN}\sum_{t,n}\sum_{k=1}^{2}\alpha^{(k)}_{i,t,n}\log\alpha^{(k)}_{i,t,n}.
+  \]
+\end{enumerate}
+
+其中门控熵会被保存，但\textbf{不参与最终评分融合}。
+
+\subsection{分布偏移分数}
+
+\texttt{compute\_distribution\_shift\_scores()} 不是直接在原始窗口上工作，
+而是在“补全后的训练窗口”和“补全后的测试窗口”上提取统计特征。
+它调用 \texttt{build\_window\_feature\_matrix()}，后者固定使用四个列块：
+\[
+[0{:}6],\ [6{:}12],\ [12{:}18],\ [0{:}18].
+\]
+对每个列块分别提取均值和标准差，再额外追加
+\begin{itemize}
+  \item 一阶差分绝对值均值；
+  \item 前 5 个非直流 FFT 幅值均值。
+\end{itemize}
+
+在当前 $N=18$ 的实现下，特征维度可精确写为
+\[
+D=2\times (6+6+6+18)+18+18=108.
+\]
+随后对这些 108 维统计特征做训练分布标准化，
+并输出 RMS 型偏移分数：
+\[
+s^{\mathrm{shift}}_i=
+\sqrt{\frac{1}{D}\sum_{d=1}^{D}
+\left(\frac{f_{i,d}-\mu^{\mathrm{train}}_d}{\sigma^{\mathrm{train}}_d}\right)^2 }.
+\]
+
+\subsection{分数归一化与融合}
+
+三类分数都先用训练集自身的均值方差标准化：
+\[
+\tilde{s}_i=
+\frac{s_i-\mu_{\mathrm{train}}}{\max(\sigma_{\mathrm{train}},10^{-6})}.
+\]
+最终原始异常分数为
+\[
+a^{\mathrm{raw}}_i=
+|\tilde{s}^{\mathrm{det}}_i|
++
+0.25\,\tilde{s}^{\mathrm{dis}}_i
++
+1.0\,\tilde{s}^{\mathrm{shift}}_i.
+\]
+
+\subsection{平滑、阈值与最终标签}
+
+\texttt{apply\_ewaf\_by\_segments()} 用 EWAF 做平滑：
+\[
+a^{\mathrm{smooth}}_1=a^{\mathrm{raw}}_1,\qquad
+a^{\mathrm{smooth}}_i=
+\alpha a^{\mathrm{raw}}_i+(1-\alpha)a^{\mathrm{smooth}}_{i-1},
+\]
+默认 $\alpha=0.3$。
+
+阈值由
+\[
+\theta=
+\max\left(
+\mu_{\mathrm{train}} + 2.0\,\sigma_{\mathrm{train}},
+Q_{0.95}(\bm{a}^{\mathrm{smooth}}_{\mathrm{train}})
+\right)
+\]
+给出，再产生原始预测
+\[
+\hat{y}^{\mathrm{raw}}_i=\mathbf{1}[a^{\mathrm{smooth}}_i\ge \theta].
+\]
+最后 \texttt{apply\_min\_anomaly\_duration()} 要求异常片段长度至少为 50，
+短于 50 的连续异常片段会被抑制为 0。
+
+\section{完整张量流与默认形状总表}
+
+\begin{longtable}{@{}p{3.0cm} p{3.7cm} p{5.0cm} p{2.4cm}@{}}
+\caption{从输入到输出的完整张量流}\\
+\toprule
+阶段 & 变量 & 说明 & 默认形状 \\
+\midrule
+\endfirsthead
+\toprule
+阶段 & 变量 & 说明 & 默认形状 \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+数据读取 &
+$\bm{X}_{\mathrm{raw}}$ &
+原始 CSV 拼接后的实值矩阵 &
+$(4100,18)$ \\
+数据读取 &
+$\bm{M}^{\mathrm{str}}$ &
+结构缺失掩码 &
+$(4100,18)$ \\
+标准化 &
+$\bm{X}_{\mathrm{scaled}}$ &
+以训练观测统计量标准化后的矩阵 &
+$(4100,18)$ \\
+训练插补构窗 &
+\texttt{train\_impute\_windows} &
+\texttt{build\_windows()} 的输出 &
+$(4100,50,18)$ \\
+训练评分构窗 &
+\texttt{train\_eval\_windows} &
+\texttt{build\_standard\_windows()} 的输出 &
+$(4001,50,18)$ \\
+测试评分构窗 &
+\texttt{test\_eval\_windows} &
+\texttt{build\_prompt\_test\_windows()} 的输出 &
+$(4000,50,18)$ \\
+批输入 &
+\texttt{x\_true} &
+训练 batch 的真实窗口 &
+$(B,50,18)$ \\
+批输入 &
+\texttt{structural\_missing\_mask} &
+训练 batch 的结构掩码 &
+$(B,50,18)$ \\
+训练增强 &
+\texttt{holdout\_mask} &
+随机从观测点采样的附加遮挡 &
+$(B,50,18)$ \\
+模型输入 &
+\texttt{x\_input} &
+被 \texttt{model\_missing\_mask} 遮掉后的输入 &
+$(B,50,18)$ \\
+预填充 &
+\texttt{x\_seed} &
+双向最近观测传播的暖启动结果 &
+$(B,50,18)$ \\
+图学习 &
+\texttt{adjacency} &
+批相关自适应邻接矩阵 &
+$(B,18,18)$ \\
+GCN 专家 &
+\texttt{x\_gcn} &
+图卷积专家重构值 &
+$(B,50,18)$ \\
+频域预处理 &
+\texttt{x\_perm} &
+\texttt{permute(0,2,1)} 后的频域输入 &
+$(B,18,50)$ \\
+频域 FFT &
+\texttt{xf} &
+实数 FFT 频谱，复数张量 &
+$(B,18,26)$ \\
+频域特征 &
+\texttt{feat} &
+实部虚部拼接后的实数特征 &
+$(B,18,52)$ \\
+频域专家 &
+\texttt{x\_freq} &
+频域增强 + 输出头修正后的结果 &
+$(B,50,18)$ \\
+门控输入 &
+\texttt{gate\_input} &
+六类标量特征 + 采样率嵌入 &
+$(B,50,18,14)$ \\
+门控输出 &
+\texttt{gate\_weights} &
+两个专家的 softmax 权重 &
+$(B,50,18,2)$ \\
+插补输出 &
+\texttt{x\_imputed} &
+两专家融合值 &
+$(B,50,18)$ \\
+补全输出 &
+\texttt{x\_complete} &
+保留观测值后的完整序列 &
+$(B,50,18)$ \\
+检测器输入 &
+\texttt{per\_variable\_input} &
+值、观测标记、变量嵌入、采样率嵌入、相位嵌入 &
+$(B,50,18,26)$ \\
+每变量投影 &
+\texttt{rate\_aware\_features} &
+\texttt{per\_variable\_proj} 的输出 &
+$(B,50,18,16)$ \\
+Token 化 &
+\texttt{token\_input} &
+按时间步拼成单 token &
+$(B,50,324)$ \\
+Transformer 编码 &
+\texttt{encoded} &
+Encoder 输出 &
+$(B,50,128)$ \\
+检测器输出 &
+\texttt{detector\_reconstruction} &
+残差重构后的检测器输出 &
+$(B,50,18)$ \\
+误差张量 &
+\texttt{detector\_error} &
+逐元素绝对误差 &
+$(B,50,18)$ \\
+窗口统计 &
+\texttt{detector\_score} &
+每个窗口 1 个重构误差分数 &
+$(B,)$ \\
+窗口统计 &
+\texttt{disagreement\_score} &
+每个窗口 1 个专家分歧度 &
+$(B,)$ \\
+窗口统计 &
+\texttt{gate\_entropy} &
+每个窗口 1 个门控熵 &
+$(B,)$ \\
+序列重构输出 &
+\texttt{train\_complete\_scaled} &
+只取每个窗口最后一步并拼接 &
+$(4100,18)$ \\
+测试预测 &
+\texttt{test\_scores} &
+EWAF 平滑后的测试异常分数 &
+$(4000,)$ \\
+测试预测 &
+\texttt{final\_prediction} &
+二值异常预测 &
+$(4000,)$ \\
+\end{longtable}
+
+\section{代码层面的实现约束、假设与注意事项}
+
+\subsection{分布偏移评分硬编码了 18 维特征布局}
+
+\texttt{build\_window\_feature\_matrix()} 固定切片
+\texttt{slice(0,6)}、\texttt{slice(6,12)}、\texttt{slice(12,18)}、
+\texttt{slice(0,18)}。
+这意味着当前偏移评分逻辑默认变量数至少能与这种三组结构对齐；
+如果换数据集，尤其是变量数量或分组方式变化，
+这一部分需要同步改写，否则特征工程语义会失真。
+
+\subsection{测试标签来自固定分割，而不是文件中真实标签}
+
+\texttt{build\_prompt\_test\_windows()} 并不读取外部标签文件，
+而是把前 2000 个窗口记为正常、后 2000 个窗口记为异常。
+这说明当前评估脚本默认测试集已经按“前正常、后异常”的时间顺序组织。
+如果测试集组织方式改变，评价指标会直接失效。
+
+\subsection{\texttt{fdr} 字段在代码里等于召回率}
+
+\texttt{compute\_binary\_classification\_metrics()} 中
+\texttt{fdr} 的实现是
+\[
+\texttt{tp}/(\texttt{tp}+\texttt{fn}),
+\]
+它与 \texttt{recall} 完全相同。
+从命名上看这并不符合通常统计学中对 FDR 的定义，
+因此解读 \texttt{metrics.json} 时要以源码实现为准。
+
+\subsection{默认参数量}
+
+在默认超参数
+\[
+N=18,\ L=50,\ d=128,\ d_g=32,\ d_{\mathrm{gcn}}=32,\ d_r=8
+\]
+下，\texttt{FusionAnomalyModel} 总参数量约为 693260。
+这是一个中等规模模型，适合在当前数据规模上做窗口级训练，
+但如果未来窗口更长、变量更多，Transformer 和门控分支的开销会明显上涨。
+
+\section{结论}
+
+从源码角度看，\texttt{mra.py} 的方法学可以概括为：
+\begin{enumerate}
+  \item 先利用 \texttt{PreImpute} 把缺失窗口变成稠密种子；
+  \item 再用 GCN 专家建模变量间结构相关性，用频域专家建模时间周期结构；
+  \item 用门控网络在位置级别自适应融合两类重构；
+  \item 用采样感知 Transformer 对补全序列做残差式重构检测；
+  \item 最后结合检测误差、专家分歧和分布偏移三种信号输出异常分数。
+\end{enumerate}
+
+频域插补模块的\textbf{代码入口}是
+\texttt{mra.py::TwoExpertGatedImputer.forward()} 中的
+\texttt{self.freq(x\_seed)}，
+其\textbf{训练入口}是 \texttt{mra.py::train\_model()}，
+而不是单独的优化器或单独的训练脚本。
+
+从训练机制上看，当前实现最值得注意的地方有两点：
+\begin{enumerate}
+  \item 检测器损失会反向影响插补器，因而这是\textbf{真正的耦合式联合训练}；
+  \item 检测器在训练期会把 holdout 位置上的插补值当作重构目标的一部分。
+\end{enumerate}
+
+如果后续要把该方法整理成正式论文或进一步工程化部署，
+建议优先补齐三类工作：
+\begin{enumerate}
+  \item 显式保存标准化器和训练评分统计量；
+  \item 把分布偏移特征工程从硬编码列切片改为可配置分组；
+  \item 明确决定检测器是否应当继续对插补器回传梯度，
+  若不希望耦合，应在检测器输入侧对 \texttt{x\_complete} 再做一次 \texttt{detach()}。
+\end{enumerate}
+
+\end{document}
