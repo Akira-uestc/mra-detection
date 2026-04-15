@@ -109,6 +109,16 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="邻接矩阵期望的对角占比，默认: 0.25",
     )
+    parser.add_argument(
+        "--physical-coords-path",
+        default=None,
+        help="可选：节点物理坐标文件（CSV/NPY），按变量顺序逐行排列。",
+    )
+    parser.add_argument(
+        "--physical-distance-path",
+        default=None,
+        help="可选：节点物理距离矩阵文件（CSV/NPY），按变量顺序排列。",
+    )
     return parser.parse_args()
 
 
@@ -162,6 +172,105 @@ def load_csv_series(input_glob: str) -> tuple[np.ndarray, np.ndarray, list[str]]
     mask = np.concatenate(masks, axis=0)
     feature_names = [f"特征{i:02d}" for i in range(1, first_cols + 1)]
     return data, mask, feature_names
+
+
+def _load_numeric_table(path: str | Path) -> np.ndarray:
+    table_path = Path(path)
+    if table_path.suffix.lower() == ".npy":
+        array = np.load(table_path)
+        if array.ndim != 2:
+            raise ValueError(f"{table_path} 应为二维数组，收到形状 {array.shape}")
+        return np.asarray(array, dtype=np.float32)
+
+    raw_df = pd.read_csv(table_path, header=None)
+    numeric_df = raw_df.apply(pd.to_numeric, errors="coerce")
+    numeric_df = numeric_df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    if numeric_df.empty:
+        raise ValueError(f"{table_path} 中未解析出有效数值表。")
+    return numeric_df.to_numpy(dtype=np.float32)
+
+
+def load_physical_distance_matrix(
+    *,
+    num_nodes: int,
+    coords_path: str | None = None,
+    distance_path: str | None = None,
+) -> np.ndarray | None:
+    if coords_path is not None and distance_path is not None:
+        raise ValueError("--physical-coords-path 和 --physical-distance-path 只能二选一。")
+    if coords_path is None and distance_path is None:
+        return None
+
+    if coords_path is not None:
+        coords = _load_numeric_table(coords_path)
+        if coords.shape[0] != num_nodes:
+            raise ValueError(
+                f"{coords_path} 的节点数为 {coords.shape[0]}，与特征数 {num_nodes} 不一致。"
+            )
+        if coords.shape[1] < 1:
+            raise ValueError(f"{coords_path} 至少需要 1 个坐标维度。")
+        diff = coords[:, None, :] - coords[None, :, :]
+        distance = np.linalg.norm(diff, axis=-1)
+    else:
+        distance = _load_numeric_table(distance_path)
+        if distance.shape != (num_nodes, num_nodes):
+            raise ValueError(
+                f"{distance_path} 的形状为 {distance.shape}，期望 {(num_nodes, num_nodes)}。"
+            )
+        distance = 0.5 * (distance + distance.T)
+
+    distance = np.asarray(distance, dtype=np.float32)
+    distance = np.maximum(distance, 0.0)
+    np.fill_diagonal(distance, 0.0)
+    return distance
+
+
+def build_data_driven_distance_matrix(
+    data: np.ndarray,
+    missing_mask: np.ndarray,
+    *,
+    mask_weight: float = 0.5,
+) -> np.ndarray:
+    if data.shape != missing_mask.shape:
+        raise ValueError(
+            f"data 和 missing_mask 形状不一致: {data.shape} vs {missing_mask.shape}"
+        )
+
+    observed_mask = 1.0 - missing_mask.astype(np.float32)
+    finite_data = np.where(np.isfinite(data), data, 0.0).astype(np.float32)
+    # 用训练期标准化轨迹和观测模式共同描述每个节点，
+    # 自动得到一个数据驱动的欧氏距离先验。
+    node_descriptors = np.concatenate(
+        [finite_data.T, mask_weight * observed_mask.T],
+        axis=1,
+    )
+    distance = np.linalg.norm(
+        node_descriptors[:, None, :] - node_descriptors[None, :, :],
+        axis=-1,
+    )
+    distance = np.asarray(distance, dtype=np.float32)
+    distance = np.maximum(distance, 0.0)
+    np.fill_diagonal(distance, 0.0)
+    return distance
+
+
+def resolve_distance_prior_matrix(
+    *,
+    data: np.ndarray,
+    missing_mask: np.ndarray,
+    coords_path: str | None = None,
+    distance_path: str | None = None,
+) -> tuple[np.ndarray, str]:
+    external_distance = load_physical_distance_matrix(
+        num_nodes=data.shape[1],
+        coords_path=coords_path,
+        distance_path=distance_path,
+    )
+    if external_distance is not None:
+        return external_distance, "external_physical"
+
+    auto_distance = build_data_driven_distance_matrix(data, missing_mask)
+    return auto_distance, "train_data_auto"
 
 
 class ObservedStandardScaler:
@@ -246,6 +355,7 @@ class GraphLearner(nn.Module):
         static_dim: int = 8,
         coord_dim: int = 8,
         self_loop_logit: float = 0.5,
+        physical_distance_matrix: torch.Tensor | np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.num_nodes = num_nodes
@@ -256,6 +366,25 @@ class GraphLearner(nn.Module):
 
         self.static_context = nn.Parameter(torch.randn(num_nodes, static_dim))
         self.node_coords = nn.Parameter(torch.randn(num_nodes, coord_dim))
+        self.register_buffer("physical_distance_matrix", None)
+        self.register_buffer("physical_distance_scale", None)
+        if physical_distance_matrix is not None:
+            distance_tensor = torch.as_tensor(physical_distance_matrix, dtype=torch.float32)
+            if distance_tensor.shape != (num_nodes, num_nodes):
+                raise ValueError(
+                    "physical_distance_matrix 形状错误，"
+                    f"期望 {(num_nodes, num_nodes)}，收到 {tuple(distance_tensor.shape)}。"
+                )
+            distance_tensor = 0.5 * (distance_tensor + distance_tensor.transpose(0, 1))
+            distance_tensor = distance_tensor.clamp_min(0.0)
+            distance_tensor.fill_diagonal_(0.0)
+            positive_distance = distance_tensor[distance_tensor > 0]
+            if positive_distance.numel() == 0:
+                distance_scale = torch.tensor(1.0, dtype=torch.float32)
+            else:
+                distance_scale = positive_distance.median().clamp_min(1e-6)
+            self.physical_distance_matrix = distance_tensor
+            self.physical_distance_scale = distance_scale
 
         dynamic_dim = 4
         self.node_encoder = nn.Sequential(
@@ -272,8 +401,13 @@ class GraphLearner(nn.Module):
 
     def _build_prior_adjacency(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         eye = torch.eye(self.num_nodes, device=device, dtype=dtype)
-        dist = torch.cdist(self.node_coords, self.node_coords, p=2)
-        prior = 1.0 / (1.0 + dist)
+        if self.physical_distance_matrix is not None:
+            dist = self.physical_distance_matrix.to(device=device, dtype=dtype)
+            scale = self.physical_distance_scale.to(device=device, dtype=dtype)
+            prior = 1.0 / (1.0 + dist / scale.clamp_min(1e-6))
+        else:
+            dist = torch.cdist(self.node_coords, self.node_coords, p=2)
+            prior = 1.0 / (1.0 + dist)
         return prior * (1.0 - eye)
 
     def _last_observed(self, x: torch.Tensor, observed: torch.Tensor) -> torch.Tensor:
@@ -337,9 +471,19 @@ class GCNLayer(nn.Module):
 
 
 class GraphGCNReconstructor(nn.Module):
-    def __init__(self, num_nodes: int, graph_hidden_dim: int = 32, gcn_hidden_dim: int = 32) -> None:
+    def __init__(
+        self,
+        num_nodes: int,
+        graph_hidden_dim: int = 32,
+        gcn_hidden_dim: int = 32,
+        physical_distance_matrix: torch.Tensor | np.ndarray | None = None,
+    ) -> None:
         super().__init__()
-        self.graph = GraphLearner(num_nodes=num_nodes, hidden_dim=graph_hidden_dim)
+        self.graph = GraphLearner(
+            num_nodes=num_nodes,
+            hidden_dim=graph_hidden_dim,
+            physical_distance_matrix=physical_distance_matrix,
+        )
         self.gcn_in = GCNLayer(1, gcn_hidden_dim)
         self.gcn_mid = GCNLayer(gcn_hidden_dim, gcn_hidden_dim)
         self.gcn_out = GCNLayer(gcn_hidden_dim, 1)
@@ -620,6 +764,12 @@ def main() -> None:
     raw_data, missing_mask, feature_names = load_csv_series(args.input_glob)
     scaler = ObservedStandardScaler().fit(raw_data, missing_mask)
     scaled_data = scaler.transform(raw_data, missing_mask)
+    distance_prior_matrix, distance_prior_source = resolve_distance_prior_matrix(
+        data=scaled_data,
+        missing_mask=missing_mask,
+        coords_path=args.physical_coords_path,
+        distance_path=args.physical_distance_path,
+    )
 
     windows, window_masks = build_windows(
         data=scaled_data,
@@ -639,7 +789,12 @@ def main() -> None:
         num_nodes=scaled_data.shape[1],
         graph_hidden_dim=args.graph_hidden_dim,
         gcn_hidden_dim=args.gcn_hidden_dim,
+        physical_distance_matrix=distance_prior_matrix,
     ).to(device)
+    if distance_prior_source == "external_physical":
+        print("图先验: 使用物理距离构造的欧氏距离相似度先验")
+    else:
+        print("图先验: 根据训练数据自动计算欧氏距离相似度先验")
 
     train_model(
         model=model,
