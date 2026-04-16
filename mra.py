@@ -21,6 +21,7 @@ from graph_gcn_reconstruction import (
     ObservedStandardScaler,
     adjacency_balance_loss,
     configure_chinese_font,
+    resolve_distance_prior_matrix,
     save_adjacency_heatmap,
     seed_everything,
     summarize_adjacency,
@@ -79,6 +80,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gcn-hidden-dim", type=int, default=32)
     parser.add_argument("--gate-hidden-dim", type=int, default=64)
     parser.add_argument("--rate-embed-dim", type=int, default=8)
+    parser.add_argument(
+        "--physical-coords-path",
+        default=None,
+        help="可选：节点物理坐标文件（CSV/NPY），按变量顺序逐行排列。",
+    )
+    parser.add_argument(
+        "--physical-distance-path",
+        default=None,
+        help="可选：节点物理距离矩阵文件（CSV/NPY），按变量顺序排列。",
+    )
     parser.add_argument("--detector-d-model", type=int, default=128)
     parser.add_argument("--detector-heads", type=int, default=4)
     parser.add_argument("--detector-layers", type=int, default=3)
@@ -277,12 +288,14 @@ class TwoExpertGatedImputer(nn.Module):
         gcn_hidden_dim: int,
         gate_hidden_dim: int,
         rate_embed_dim: int,
+        physical_distance_matrix: torch.Tensor | np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.gcn = GraphGCNReconstructor(
             num_nodes=num_nodes,
             graph_hidden_dim=graph_hidden_dim,
             gcn_hidden_dim=gcn_hidden_dim,
+            physical_distance_matrix=physical_distance_matrix,
         )
         self.freq = FrequencyOnlyReconstructor(num_features=num_nodes, seq_len=seq_len)
         self.rate_embedding = nn.Embedding(num_rates, rate_embed_dim)
@@ -468,6 +481,7 @@ class FusionAnomalyModel(nn.Module):
         detector_heads: int,
         detector_layers: int,
         dropout: float,
+        physical_distance_matrix: torch.Tensor | np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.imputer = TwoExpertGatedImputer(
@@ -478,6 +492,7 @@ class FusionAnomalyModel(nn.Module):
             gcn_hidden_dim=gcn_hidden_dim,
             gate_hidden_dim=gate_hidden_dim,
             rate_embed_dim=rate_embed_dim,
+            physical_distance_matrix=physical_distance_matrix,
         )
         self.detector = SamplingAwareTransformerAD(
             num_nodes=num_nodes,
@@ -850,6 +865,12 @@ def main() -> None:
     scaler = ObservedStandardScaler().fit(train_raw, train_mask)
     train_scaled = scaler.transform(train_raw, train_mask)
     test_scaled = scaler.transform(test_raw, test_mask)
+    distance_prior_matrix, distance_prior_source = resolve_distance_prior_matrix(
+        data=train_scaled,
+        missing_mask=train_mask,
+        coords_path=args.physical_coords_path,
+        distance_path=args.physical_distance_path,
+    )
 
     train_impute_windows, train_impute_masks = build_windows(
         train_scaled,
@@ -883,6 +904,10 @@ def main() -> None:
     print(f"测试评分窗口: {test_eval_windows.shape}")
     print(f"采样率分组 rate_id: {rate_id.tolist()}")
     print(f"推断步长 stride: {stride.tolist()}")
+    if distance_prior_source == "external_physical":
+        print("图先验: 使用物理距离构造的欧氏距离相似度先验")
+    else:
+        print("图先验: 根据训练数据自动计算欧氏距离相似度先验")
 
     model = FusionAnomalyModel(
         num_nodes=train_scaled.shape[1],
@@ -896,6 +921,7 @@ def main() -> None:
         detector_heads=args.detector_heads,
         detector_layers=args.detector_layers,
         dropout=args.dropout,
+        physical_distance_matrix=distance_prior_matrix,
     ).to(device)
 
     history = train_model(
