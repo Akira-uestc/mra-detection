@@ -620,11 +620,7 @@ def run_experiment(
         threshold=threshold,
         split_idx=split_index_from_labels(test_labels),
         save_path=output_dir / "anomaly_scores.png",
-        title=f"{experiment_name} 异常检测结果",
-        style="mra",
-        figsize=(16, 5),
-        dpi=180,
-        threshold_label_fmt="阈值 = {threshold:.4f}",
+        color_scheme="mra",
     )
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))

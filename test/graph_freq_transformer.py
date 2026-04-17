@@ -5,11 +5,14 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+TEST_DIR = Path(__file__).resolve().parent
+for path in (ROOT_DIR, TEST_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -24,9 +27,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from freq_reconstruction import FrequencyOnlyReconstructor
 from graph_gcn_reconstruction import (
-    GraphGCNReconstructor,
     ObservedStandardScaler,
     adjacency_balance_loss,
     configure_chinese_font,
@@ -35,6 +36,19 @@ from graph_gcn_reconstruction import (
     seed_everything,
     summarize_adjacency,
 )
+from mra import (
+    LossWeights,
+    TwoExpertGatedImputer,
+    apply_min_anomaly_duration,
+    choose_device,
+    infer_rate_metadata,
+    masked_mse,
+    normalize_scores,
+    sample_holdout_mask,
+    save_csv,
+    save_gate_statistics,
+)
+from single_expert_transformer_base import SimpleTransformerAD
 from utils.methods.data_loading import load_csv_glob_with_mask
 from utils.methods.display import (
     compute_binary_classification_metrics,
@@ -53,24 +67,29 @@ from utils.methods.windowing import (
 )
 
 
-def build_parser(
-    *,
-    description: str,
-    default_output_dir: str,
-) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=description)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="双专家门控插补 + 普通 Transformer 异常检测。"
+    )
     parser.add_argument("--train-glob", default="data/train/train_1.csv")
     parser.add_argument("--test-glob", default="data/test/test_C5_1.csv")
-    parser.add_argument("--output-dir", default=default_output_dir)
+    parser.add_argument("--output-dir", default="test/outputs/graph_freq_transformer")
     parser.add_argument("--seq-len", type=int, default=50)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--holdout-ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--holdout-ratio",
+        type=float,
+        default=0.15,
+        help="训练时从观测点额外随机遮挡的比例。",
+    )
     parser.add_argument("--graph-hidden-dim", type=int, default=32)
     parser.add_argument("--gcn-hidden-dim", type=int, default=32)
+    parser.add_argument("--gate-hidden-dim", type=int, default=64)
+    parser.add_argument("--rate-embed-dim", type=int, default=8)
     parser.add_argument(
         "--physical-coords-path",
         default=None,
@@ -81,142 +100,132 @@ def build_parser(
         default=None,
         help="可选：节点物理距离矩阵文件（CSV/NPY），按变量顺序排列。",
     )
+    parser.add_argument("--detector-d-model", type=int, default=128)
+    parser.add_argument("--detector-heads", type=int, default=4)
+    parser.add_argument("--detector-layers", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--diag-target", type=float, default=0.25)
-    parser.add_argument("--graph-loss-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--score-disagreement-weight",
+        type=float,
+        default=0.25,
+        help="将专家分歧并入最终异常分数时的权重。",
+    )
     parser.add_argument("--threshold-std-factor", type=float, default=2.0)
     parser.add_argument("--threshold-quantile", type=float, default=0.95)
-    parser.add_argument("--ewaf-alpha", type=float, default=0.3)
-    parser.add_argument("--min-anomaly-duration", type=int, default=50)
+    parser.add_argument(
+        "--ewaf-alpha",
+        type=float,
+        default=0.3,
+        help="异常分数 EWAF 平滑系数，取值范围 (0, 1]。",
+    )
+    parser.add_argument(
+        "--min-anomaly-duration",
+        type=int,
+        default=50,
+        help="最短异常持续长度，单位为窗口点数；小于该长度的连续异常片段会被抑制。",
+    )
     parser.add_argument("--seed", type=int, default=40)
     parser.add_argument("--device", default=None)
-    return parser
+    return parser.parse_args()
 
 
-def choose_device(device_arg: str | None) -> torch.device:
-    if device_arg is not None:
-        return torch.device(device_arg)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def save_csv(data: np.ndarray, feature_names: list[str], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(data, columns=feature_names).to_csv(output_path, index=False)
-
-
-def masked_mse(
-    prediction: torch.Tensor,
-    target: torch.Tensor,
-    target_mask: torch.Tensor,
-) -> torch.Tensor:
-    squared_error = ((prediction - target) * target_mask).pow(2)
-    return squared_error.sum() / target_mask.sum().clamp_min(1.0)
-
-
-def sample_holdout_mask(missing_mask: torch.Tensor, ratio: float) -> torch.Tensor:
-    observed = ~missing_mask.bool()
-    holdout = ((torch.rand_like(missing_mask) < ratio) & observed).view(
-        missing_mask.size(0),
-        -1,
-    )
-    observed_flat = observed.view(missing_mask.size(0), -1)
-
-    for batch_idx in range(holdout.size(0)):
-        if observed_flat[batch_idx].sum() == 0:
-            continue
-        if holdout[batch_idx].any():
-            continue
-        candidate_idx = torch.nonzero(observed_flat[batch_idx], as_tuple=False).squeeze(
-            -1
-        )
-        picked = candidate_idx[
-            torch.randint(0, len(candidate_idx), (1,), device=missing_mask.device)
-        ]
-        holdout[batch_idx, picked] = True
-
-    return holdout.view_as(missing_mask).float()
-
-
-class SingleExpertDirectDetectionModel(nn.Module):
+class GraphFreqTransformerAnomalyModel(nn.Module):
     def __init__(
         self,
         *,
-        expert_type: str,
         num_nodes: int,
         seq_len: int,
+        num_rates: int,
         graph_hidden_dim: int,
         gcn_hidden_dim: int,
+        gate_hidden_dim: int,
+        rate_embed_dim: int,
+        detector_d_model: int,
+        detector_heads: int,
+        detector_layers: int,
+        dropout: float,
         physical_distance_matrix: torch.Tensor | np.ndarray | None = None,
     ) -> None:
         super().__init__()
-        self.expert_type = expert_type
-        if expert_type == "freq":
-            self.expert = FrequencyOnlyReconstructor(
-                num_features=num_nodes,
-                seq_len=seq_len,
-            )
-        elif expert_type == "graph":
-            self.expert = GraphGCNReconstructor(
-                num_nodes=num_nodes,
-                graph_hidden_dim=graph_hidden_dim,
-                gcn_hidden_dim=gcn_hidden_dim,
-                physical_distance_matrix=physical_distance_matrix,
-            )
-        else:
-            raise ValueError(f"不支持的 expert_type: {expert_type}")
+        self.imputer = TwoExpertGatedImputer(
+            num_nodes=num_nodes,
+            seq_len=seq_len,
+            num_rates=num_rates,
+            graph_hidden_dim=graph_hidden_dim,
+            gcn_hidden_dim=gcn_hidden_dim,
+            gate_hidden_dim=gate_hidden_dim,
+            rate_embed_dim=rate_embed_dim,
+            physical_distance_matrix=physical_distance_matrix,
+        )
+        self.detector = SimpleTransformerAD(
+            num_nodes=num_nodes,
+            d_model=detector_d_model,
+            num_heads=detector_heads,
+            num_layers=detector_layers,
+            dropout=dropout,
+        )
 
     def forward(
         self,
         x_input: torch.Tensor,
         model_missing_mask: torch.Tensor,
-    ) -> dict[str, torch.Tensor | None]:
-        if self.expert_type == "graph":
-            x_expert, adjacency = self.expert(x_input, model_missing_mask)
-        else:
-            x_expert = self.expert(x_input)
-            adjacency = None
+        structural_missing_mask: torch.Tensor,
+        rate_id: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        outputs = self.imputer(x_input, model_missing_mask, rate_id)
+        observed_mask = 1.0 - structural_missing_mask
+        detector_reconstruction = self.detector(outputs["x_complete"], observed_mask)
 
-        x_complete = torch.where(model_missing_mask.bool(), x_expert, x_input)
-        return {
-            "x_expert": x_expert,
-            "x_complete": x_complete,
-            "adjacency": adjacency,
-        }
+        outputs["detector_reconstruction"] = detector_reconstruction
+        outputs["detector_error"] = torch.abs(
+            detector_reconstruction - outputs["x_complete"]
+        )
+        return outputs
 
 
 def compute_losses(
-    outputs: dict[str, torch.Tensor | None],
+    outputs: dict[str, torch.Tensor],
     x_true: torch.Tensor,
+    structural_missing_mask: torch.Tensor,
     holdout_mask: torch.Tensor,
-    *,
-    expert_type: str,
+    loss_weights: LossWeights,
     diag_target: float,
-    graph_loss_weight: float,
 ) -> dict[str, torch.Tensor]:
-    x_expert = outputs["x_expert"]
-    assert isinstance(x_expert, torch.Tensor)
+    fusion_loss = masked_mse(outputs["x_imputed"], x_true, holdout_mask)
+    gcn_loss = masked_mse(outputs["x_gcn"], x_true, holdout_mask)
+    freq_loss = masked_mse(outputs["x_freq"], x_true, holdout_mask)
+    graph_loss = adjacency_balance_loss(outputs["adjacency"], target_diag=diag_target)
 
-    expert_loss = masked_mse(x_expert, x_true, holdout_mask)
-    if expert_type == "graph":
-        adjacency = outputs["adjacency"]
-        assert isinstance(adjacency, torch.Tensor)
-        graph_loss = adjacency_balance_loss(adjacency, target_diag=diag_target)
-    else:
-        graph_loss = expert_loss.new_zeros(())
+    observed_mask = 1.0 - structural_missing_mask
+    detector_loss = masked_mse(
+        outputs["detector_reconstruction"],
+        outputs["x_complete"].detach(),
+        observed_mask,
+    )
 
-    total_loss = expert_loss + graph_loss_weight * graph_loss
+    total_loss = (
+        loss_weights.fusion * fusion_loss
+        + loss_weights.gcn * gcn_loss
+        + loss_weights.freq * freq_loss
+        + loss_weights.detector * detector_loss
+        + loss_weights.graph * graph_loss
+    )
     return {
-        "expert_loss": expert_loss,
+        "fusion_loss": fusion_loss,
+        "gcn_loss": gcn_loss,
+        "freq_loss": freq_loss,
+        "detector_loss": detector_loss,
         "graph_loss": graph_loss,
         "total_loss": total_loss,
     }
 
 
 def train_model(
-    model: SingleExpertDirectDetectionModel,
+    model: GraphFreqTransformerAnomalyModel,
     train_windows: np.ndarray,
     train_masks: np.ndarray,
-    *,
-    expert_type: str,
+    rate_id: torch.Tensor,
     device: torch.device,
     epochs: int,
     batch_size: int,
@@ -224,7 +233,7 @@ def train_model(
     weight_decay: float,
     holdout_ratio: float,
     diag_target: float,
-    graph_loss_weight: float,
+    loss_weights: LossWeights,
 ) -> list[dict[str, float]]:
     loader = DataLoader(
         TensorDataset(torch.tensor(train_windows), torch.tensor(train_masks)),
@@ -232,12 +241,16 @@ def train_model(
         shuffle=True,
     )
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    rate_id = rate_id.to(device)
     history: list[dict[str, float]] = []
 
     for epoch in range(epochs):
         model.train()
         meter = {
-            "expert_loss": 0.0,
+            "fusion_loss": 0.0,
+            "gcn_loss": 0.0,
+            "freq_loss": 0.0,
+            "detector_loss": 0.0,
             "graph_loss": 0.0,
             "total_loss": 0.0,
         }
@@ -249,14 +262,19 @@ def train_model(
             model_missing_mask = torch.maximum(structural_missing_mask, holdout_mask)
             x_input = x_true.masked_fill(model_missing_mask.bool(), 0.0)
 
-            outputs = model(x_input, model_missing_mask)
+            outputs = model(
+                x_input=x_input,
+                model_missing_mask=model_missing_mask,
+                structural_missing_mask=structural_missing_mask,
+                rate_id=rate_id,
+            )
             losses = compute_losses(
                 outputs=outputs,
                 x_true=x_true,
+                structural_missing_mask=structural_missing_mask,
                 holdout_mask=holdout_mask,
-                expert_type=expert_type,
+                loss_weights=loss_weights,
                 diag_target=diag_target,
-                graph_loss_weight=graph_loss_weight,
             )
 
             optimizer.zero_grad()
@@ -272,7 +290,8 @@ def train_model(
         print(
             f"Epoch {epoch + 1:02d}/{epochs} "
             f"total={epoch_stats['total_loss']:.5f} "
-            f"expert={epoch_stats['expert_loss']:.5f} "
+            f"fusion={epoch_stats['fusion_loss']:.5f} "
+            f"det={epoch_stats['detector_loss']:.5f} "
             f"graph={epoch_stats['graph_loss']:.5f}"
         )
 
@@ -281,60 +300,67 @@ def train_model(
 
 @torch.no_grad()
 def reconstruct_full_sequence(
-    model: SingleExpertDirectDetectionModel,
+    model: GraphFreqTransformerAnomalyModel,
     windows: np.ndarray,
     masks: np.ndarray,
-    *,
+    rate_id: torch.Tensor,
     device: torch.device,
     batch_size: int,
-) -> tuple[np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     loader = DataLoader(
         TensorDataset(torch.tensor(windows), torch.tensor(masks)),
         batch_size=batch_size,
         shuffle=False,
     )
+    rate_id = rate_id.to(device)
 
     completed = []
-    adjacencies = []
-    has_adjacency = False
+    gate_weights = []
+    adj_samples = []
     model.eval()
 
     for x_true, structural_missing_mask in loader:
         x_true = x_true.to(device)
         structural_missing_mask = structural_missing_mask.to(device)
         x_input = x_true.masked_fill(structural_missing_mask.bool(), 0.0)
-        outputs = model(x_input, structural_missing_mask)
+        outputs = model(
+            x_input=x_input,
+            model_missing_mask=structural_missing_mask,
+            structural_missing_mask=structural_missing_mask,
+            rate_id=rate_id,
+        )
+        completed.append(outputs["x_complete"][:, -1, :].cpu().numpy())
+        gate_weights.append(outputs["gate_weights"][:, -1, :, :].cpu().numpy())
+        adj_samples.append(outputs["adjacency"].cpu().numpy())
 
-        x_complete = outputs["x_complete"]
-        adjacency = outputs["adjacency"]
-        assert isinstance(x_complete, torch.Tensor)
-        completed.append(x_complete[:, -1, :].cpu().numpy())
-        if adjacency is not None:
-            has_adjacency = True
-            adjacencies.append(adjacency.cpu().numpy())
-
-    completed_array = np.concatenate(completed, axis=0).astype(np.float32)
-    adjacency_array = None
-    if has_adjacency:
-        adjacency_array = np.concatenate(adjacencies, axis=0).astype(np.float32)
-    return completed_array, adjacency_array
+    return (
+        np.concatenate(completed, axis=0).astype(np.float32),
+        np.concatenate(gate_weights, axis=0).astype(np.float32),
+        np.concatenate(adj_samples, axis=0).astype(np.float32),
+    )
 
 
 @torch.no_grad()
-def collect_detection_scores(
-    model: SingleExpertDirectDetectionModel,
+def collect_window_statistics(
+    model: GraphFreqTransformerAnomalyModel,
     windows: np.ndarray,
     masks: np.ndarray,
-    *,
+    rate_id: torch.Tensor,
     device: torch.device,
     batch_size: int,
-) -> np.ndarray:
+) -> dict[str, np.ndarray]:
     loader = DataLoader(
         TensorDataset(torch.tensor(windows), torch.tensor(masks)),
         batch_size=batch_size,
         shuffle=False,
     )
-    scores = []
+    rate_id = rate_id.to(device)
+
+    collected = {
+        "detector_score": [],
+        "disagreement_score": [],
+        "gate_entropy": [],
+    }
     model.eval()
 
     for x_true, structural_missing_mask in loader:
@@ -342,29 +368,78 @@ def collect_detection_scores(
         structural_missing_mask = structural_missing_mask.to(device)
         observed_mask = 1.0 - structural_missing_mask
         x_input = x_true.masked_fill(structural_missing_mask.bool(), 0.0)
-        outputs = model(x_input, structural_missing_mask)
+        outputs = model(
+            x_input=x_input,
+            model_missing_mask=structural_missing_mask,
+            structural_missing_mask=structural_missing_mask,
+            rate_id=rate_id,
+        )
 
-        x_expert = outputs["x_expert"]
-        assert isinstance(x_expert, torch.Tensor)
-        expert_sq = ((x_expert - x_true) * observed_mask).pow(2)
-        expert_score = expert_sq.sum(dim=(1, 2)) / observed_mask.sum(
+        detector_sq = (
+            (outputs["detector_reconstruction"] - outputs["x_complete"]) * observed_mask
+        ).pow(2)
+        detector_score = detector_sq.sum(dim=(1, 2)) / observed_mask.sum(
             dim=(1, 2)
         ).clamp_min(1.0)
-        scores.append(expert_score.cpu().numpy().astype(np.float32))
+        disagreement_score = torch.abs(outputs["x_gcn"] - outputs["x_freq"]).mean(
+            dim=(1, 2)
+        )
+        gate = outputs["gate_weights"].clamp_min(1e-8)
+        gate_entropy = -(gate * gate.log()).sum(dim=-1).mean(dim=(1, 2))
 
-    return np.concatenate(scores, axis=0).astype(np.float32)
+        collected["detector_score"].append(
+            detector_score.cpu().numpy().astype(np.float32)
+        )
+        collected["disagreement_score"].append(
+            disagreement_score.cpu().numpy().astype(np.float32)
+        )
+        collected["gate_entropy"].append(gate_entropy.cpu().numpy().astype(np.float32))
+
+    return {
+        key: np.concatenate(value, axis=0).astype(np.float32)
+        for key, value in collected.items()
+    }
+
+
+def combine_scores(
+    train_stats: dict[str, np.ndarray],
+    eval_stats: dict[str, np.ndarray],
+    disagreement_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    train_det, eval_det = normalize_scores(
+        train_stats["detector_score"],
+        eval_stats["detector_score"],
+    )
+    train_score = train_det
+    eval_score = eval_det
+
+    if disagreement_weight != 0.0:
+        train_gap, eval_gap = normalize_scores(
+            train_stats["disagreement_score"],
+            eval_stats["disagreement_score"],
+        )
+        train_score = train_score + disagreement_weight * train_gap
+        eval_score = eval_score + disagreement_weight * eval_gap
+
+    return train_score.astype(np.float32), eval_score.astype(np.float32)
 
 
 def save_training_curve(history: list[dict[str, float]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     epochs = np.arange(1, len(history) + 1)
     total = [item["total_loss"] for item in history]
-    expert = [item["expert_loss"] for item in history]
+    fusion = [item["fusion_loss"] for item in history]
+    detector = [item["detector_loss"] for item in history]
+    gcn = [item["gcn_loss"] for item in history]
+    freq = [item["freq_loss"] for item in history]
     graph = [item["graph_loss"] for item in history]
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(epochs, total, label="总损失", color="#1D3557")
-    ax.plot(epochs, expert, label="重构损失", color="#457B9D")
+    ax.plot(epochs, fusion, label="融合插补损失", color="#457B9D")
+    ax.plot(epochs, detector, label="Transformer 检测损失", color="#E63946")
+    ax.plot(epochs, gcn, label="GCN 损失", color="#2A9D8F")
+    ax.plot(epochs, freq, label="频域损失", color="#E9C46A")
     ax.plot(epochs, graph, label="图正则损失", color="#E76F51")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
@@ -376,36 +451,8 @@ def save_training_curve(history: list[dict[str, float]], output_path: Path) -> N
     plt.close(fig)
 
 
-def apply_min_anomaly_duration(
-    prediction: np.ndarray,
-    min_duration: int,
-) -> np.ndarray:
-    if min_duration <= 1:
-        return prediction.astype(np.int64)
-
-    filtered = np.zeros_like(prediction, dtype=np.int64)
-    run_start: int | None = None
-
-    for idx in range(len(prediction) + 1):
-        current = int(prediction[idx]) if idx < len(prediction) else 0
-        if current == 1 and run_start is None:
-            run_start = idx
-            continue
-        if current == 0 and run_start is not None:
-            if idx - run_start >= min_duration:
-                filtered[run_start:idx] = 1
-            run_start = None
-
-    return filtered
-
-
-def run_experiment(
-    *,
-    args: argparse.Namespace,
-    expert_type: str,
-    experiment_name: str,
-    description: str,
-) -> None:
+def main() -> None:
+    args = parse_args()
     if not 0.0 < args.ewaf_alpha <= 1.0:
         raise ValueError(f"--ewaf-alpha 必须在 (0, 1] 内，收到 {args.ewaf_alpha}")
     if args.min_anomaly_duration < 1:
@@ -419,6 +466,7 @@ def run_experiment(
     output_dir = ROOT_DIR / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     device = choose_device(args.device)
+    loss_weights = LossWeights()
 
     train_raw, train_mask, feature_names = load_csv_glob_with_mask(args.train_glob)
     test_raw, test_mask, _ = load_csv_glob_with_mask(args.test_glob)
@@ -426,17 +474,12 @@ def run_experiment(
     scaler = ObservedStandardScaler().fit(train_raw, train_mask)
     train_scaled = scaler.transform(train_raw, train_mask)
     test_scaled = scaler.transform(test_raw, test_mask)
-
-    physical_distance_matrix = None
-    if expert_type == "graph":
-        physical_distance_matrix, distance_prior_source = resolve_distance_prior_matrix(
-            data=train_scaled,
-            missing_mask=train_mask,
-            coords_path=args.physical_coords_path,
-            distance_path=args.physical_distance_path,
-        )
-    else:
-        distance_prior_source = None
+    distance_prior_matrix, distance_prior_source = resolve_distance_prior_matrix(
+        data=train_scaled,
+        missing_mask=train_mask,
+        coords_path=args.physical_coords_path,
+        distance_path=args.physical_distance_path,
+    )
 
     train_impute_windows, train_impute_masks = build_windows(
         train_scaled,
@@ -463,30 +506,39 @@ def run_experiment(
         stride=args.stride,
     )
 
-    print(description)
+    rate_id, stride = infer_rate_metadata(train_mask.astype(np.float32))
+    print("双专家门控插补 + 普通 Transformer 异常检测")
     print(f"使用设备: {device}")
     print(f"训练插补窗口: {train_impute_windows.shape}")
     print(f"训练评分窗口: {train_eval_windows.shape}")
     print(f"测试评分窗口: {test_eval_windows.shape}")
+    print(f"采样率分组 rate_id: {rate_id.tolist()}")
+    print(f"推断步长 stride: {stride.tolist()}")
     if distance_prior_source == "external_physical":
         print("图先验: 使用物理距离构造的欧氏距离相似度先验")
-    elif distance_prior_source == "train_data_auto":
+    else:
         print("图先验: 根据训练数据自动计算欧氏距离相似度先验")
 
-    model = SingleExpertDirectDetectionModel(
-        expert_type=expert_type,
+    model = GraphFreqTransformerAnomalyModel(
         num_nodes=train_scaled.shape[1],
         seq_len=args.seq_len,
+        num_rates=int(rate_id.max().item()) + 1,
         graph_hidden_dim=args.graph_hidden_dim,
         gcn_hidden_dim=args.gcn_hidden_dim,
-        physical_distance_matrix=physical_distance_matrix,
+        gate_hidden_dim=args.gate_hidden_dim,
+        rate_embed_dim=args.rate_embed_dim,
+        detector_d_model=args.detector_d_model,
+        detector_heads=args.detector_heads,
+        detector_layers=args.detector_layers,
+        dropout=args.dropout,
+        physical_distance_matrix=distance_prior_matrix,
     ).to(device)
 
     history = train_model(
         model=model,
         train_windows=train_impute_windows,
         train_masks=train_impute_masks,
-        expert_type=expert_type,
+        rate_id=rate_id,
         device=device,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -494,30 +546,36 @@ def run_experiment(
         weight_decay=args.weight_decay,
         holdout_ratio=args.holdout_ratio,
         diag_target=args.diag_target,
-        graph_loss_weight=args.graph_loss_weight,
+        loss_weights=loss_weights,
     )
 
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "args": vars(args),
-            "expert_type": expert_type,
-            "experiment_name": experiment_name,
+            "rate_id": rate_id,
+            "stride": stride,
+            "loss_weights": asdict(loss_weights),
+            "detector_type": "simple_transformer",
         },
         output_dir / "model.pt",
     )
 
-    train_complete_scaled, train_adjacency = reconstruct_full_sequence(
-        model=model,
-        windows=train_impute_windows,
-        masks=train_impute_masks,
-        device=device,
-        batch_size=args.batch_size,
+    train_complete_scaled, train_gate_weights, train_adjacency = (
+        reconstruct_full_sequence(
+            model=model,
+            windows=train_impute_windows,
+            masks=train_impute_masks,
+            rate_id=rate_id,
+            device=device,
+            batch_size=args.batch_size,
+        )
     )
-    test_complete_scaled, _ = reconstruct_full_sequence(
+    test_complete_scaled, test_gate_weights, _ = reconstruct_full_sequence(
         model=model,
         windows=test_impute_windows,
         masks=test_impute_masks,
+        rate_id=rate_id,
         device=device,
         batch_size=args.batch_size,
     )
@@ -532,34 +590,46 @@ def run_experiment(
         feature_names,
         output_dir / "test_completed.csv",
     )
+    save_gate_statistics(
+        train_gate_weights,
+        feature_names,
+        output_dir / "train_gate_weights.csv",
+    )
+    save_gate_statistics(
+        test_gate_weights,
+        feature_names,
+        output_dir / "test_gate_weights.csv",
+    )
+    summarize_adjacency(train_adjacency)
+    save_adjacency_heatmap(train_adjacency, output_dir / "train_adjacency_heatmap.png")
+    save_adjacency_heatmap(
+        train_adjacency,
+        output_dir / "train_adjacency_heatmap_offdiag.png",
+        suppress_diagonal=True,
+    )
 
-    if train_adjacency is not None:
-        summarize_adjacency(train_adjacency)
-        save_adjacency_heatmap(
-            train_adjacency,
-            output_dir / "train_adjacency_heatmap.png",
-        )
-        save_adjacency_heatmap(
-            train_adjacency,
-            output_dir / "train_adjacency_heatmap_offdiag.png",
-            suppress_diagonal=True,
-        )
-
-    train_raw_scores = collect_detection_scores(
+    train_stats = collect_window_statistics(
         model=model,
         windows=train_eval_windows,
         masks=train_eval_masks,
+        rate_id=rate_id,
         device=device,
         batch_size=args.batch_size,
     )
-    test_raw_scores = collect_detection_scores(
+    test_stats = collect_window_statistics(
         model=model,
         windows=test_eval_windows,
         masks=test_eval_masks,
+        rate_id=rate_id,
         device=device,
         batch_size=args.batch_size,
     )
 
+    train_raw_scores, test_raw_scores = combine_scores(
+        train_stats=train_stats,
+        eval_stats=test_stats,
+        disagreement_weight=args.score_disagreement_weight,
+    )
     test_segment_lengths = infer_segment_lengths(test_labels)
     test_split_idx = split_index_from_labels(test_labels)
     train_scores = apply_ewaf_by_segments(train_raw_scores, args.ewaf_alpha)
@@ -589,7 +659,10 @@ def run_experiment(
         {
             "sample_index": np.arange(1, len(test_scores) + 1),
             "label": test_labels,
-            "raw_score": test_raw_scores,
+            "detector_score": test_stats["detector_score"],
+            "disagreement_score": test_stats["disagreement_score"],
+            "gate_entropy": test_stats["gate_entropy"],
+            "raw_final_score": test_raw_scores,
             "final_score": test_scores,
             "threshold_prediction": threshold_prediction,
             "prediction": final_prediction,
@@ -598,12 +671,15 @@ def run_experiment(
     prediction_df.to_csv(output_dir / "test_predictions.csv", index=False)
 
     summary = {
-        "experiment": experiment_name,
-        "description": description,
-        "expert_type": expert_type,
+        "experiment": "graph_freq_transformer",
+        "description": "双专家门控插补 + 普通 Transformer 异常检测",
+        "detector_type": "simple_transformer",
         "device": str(device),
         "config": vars(args),
+        "loss_weights": asdict(loss_weights),
         "metrics": metrics,
+        "ewaf_alpha": args.ewaf_alpha,
+        "min_anomaly_duration": args.min_anomaly_duration,
         "train_raw_score_mean": float(np.mean(train_raw_scores)),
         "train_raw_score_std": float(np.std(train_raw_scores)),
         "train_score_mean": float(np.mean(train_scores)),
@@ -611,6 +687,8 @@ def run_experiment(
         "train_threshold_quantile": float(
             np.quantile(train_scores, args.threshold_quantile)
         ),
+        "rate_id": rate_id.tolist(),
+        "stride": stride.tolist(),
     }
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as file:
         json.dump(summary, file, ensure_ascii=False, indent=2)
@@ -624,4 +702,16 @@ def run_experiment(
         color_scheme="mra",
     )
 
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+    print("输出文件:")
+    print(f"  模型: {output_dir / 'model.pt'}")
+    print(f"  Train 补全: {output_dir / 'train_completed.csv'}")
+    print(f"  Test 补全 : {output_dir / 'test_completed.csv'}")
+    print(f"  门控权重 : {output_dir / 'train_gate_weights.csv'}")
+    print(f"  预测结果 : {output_dir / 'test_predictions.csv'}")
+    print(f"  指标汇总 : {output_dir / 'metrics.json'}")
+    print(f"  曲线图   : {output_dir / 'anomaly_scores.png'}")
+
+
+if __name__ == "__main__":
+    main()

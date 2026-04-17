@@ -667,11 +667,7 @@ def main() -> None:
         threshold=threshold,
         split_idx=test_split_idx,
         save_path=output_dir / "anomaly_scores.png",
-        title="双专家门控插补 + 直接重构检测",
-        style="mra",
-        figsize=(16, 5),
-        dpi=180,
-        threshold_label_fmt="阈值 = {threshold:.4f}",
+        color_scheme="mra",
     )
 
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
