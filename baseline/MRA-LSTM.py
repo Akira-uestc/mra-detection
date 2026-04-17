@@ -35,7 +35,9 @@ from utils.methods.windowing import (
 )
 
 warnings.filterwarnings("ignore")
-plt.rcParams["font.sans-serif"] = ["SimHei"]
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -513,8 +515,7 @@ def plot_training_loss(losses: list[float]) -> None:
     plt.plot(losses, label="Training Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("MRA-LSTM Training Loss")
-    plt.legend()
+    plt.legend(fontsize=15)
     plt.grid(True, alpha=0.3)
     plt.show()
 
@@ -596,7 +597,8 @@ def main():
         f"mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}"
     )
 
-    threshold_train = choose_threshold(train_errors, method="mean")
+    # threshold_train = choose_threshold(train_errors, method="mean")
+    threshold_train = choose_threshold(train_errors, method="gaussian_quantile_max")
     print(f"Training-based threshold (mean train score): {threshold_train:.6f}")
 
     print("\nComputing test anomaly scores...")
@@ -648,8 +650,8 @@ def main():
         threshold_train,
         split_idx,
         PROJECT_ROOT / "outputs" / "mra_lstm_detection.png",
-        title="MRA-LSTM异常检测",
         ylabel="重构误差",
+        color_scheme="mra",
         show=True,
     )
 

@@ -26,7 +26,9 @@ from utils.methods.windowing import (
     build_prompt_test_windows_values,
 )
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -209,8 +211,8 @@ def train_model():
             threshold,
             split_idx,
             "/home/akira/codespace/mra-detection/outputs/cnn_detection_results.png",
-            title="CNN异常检测",
             ylabel="重构误差",
+            color_scheme="mra",
             show=True,
         )
         

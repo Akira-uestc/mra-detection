@@ -16,7 +16,9 @@ from torch.utils.data import DataLoader, TensorDataset
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-plt.rcParams["font.sans-serif"] = ["SimHei"]
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 from _project_root import PROJECT_ROOT
 from utils.methods.data_loading import load_csv_dir_values
@@ -225,8 +227,8 @@ def train_model():
             split_idx,
             output_path,
             show=True,
-            title="VAE异常检测",
             ylabel="重构误差",
+            color_scheme="mra",
         )
 
 

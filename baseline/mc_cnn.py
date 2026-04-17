@@ -51,7 +51,9 @@ from utils.methods.windowing import (
 )
 
 
-plt.rcParams["font.sans-serif"] = ["SimHei"]
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 EPS = 1e-6
 USE_EWAF = True
@@ -550,8 +552,8 @@ def train_model() -> None:
         threshold,
         split_idx,
         PROJECT_ROOT / "outputs" / "mc_cnn_detection.png",
-        title="MC-CNN异常检测",
         ylabel="异常分数",
+        color_scheme="mra",
     )
 
 

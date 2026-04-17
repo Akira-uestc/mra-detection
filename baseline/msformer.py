@@ -3,7 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import copy
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 from model.mstransformer import MSTransformer
@@ -273,8 +275,8 @@ def run_full_detection():
         threshold,
         split_idx,
         PROJECT_ROOT / "outputs" /"msformer_detection_results.png",
-        title="Multirate Former 异常检测",
         ylabel="重构误差",
+        color_scheme="mra",
         show=True,
     )
 

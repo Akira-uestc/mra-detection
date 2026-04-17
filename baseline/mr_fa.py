@@ -23,7 +23,9 @@ from utils.methods.windowing import (
     build_prompt_test_windows_values,
 )
 
-plt.rcParams["font.sans-serif"] = ["SimHei"]
+plt.rcParams["font.family"] = ["SimSun"]
+plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 
 EPS = 1e-8
@@ -465,8 +467,8 @@ def train_model() -> None:
         threshold,
         split_idx,
         PROJECT_ROOT / "outputs" / "mr_fa_detection.png",
-        title="MR-FA异常检测",
         ylabel="异常分数",
+        color_scheme="mra",
     )
 
 
