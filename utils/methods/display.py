@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import font_manager
 
 
 _METRIC_LABELS = {
@@ -34,6 +35,31 @@ _NON_INTERACTIVE_BACKENDS = {
     "template",
     "module://matplotlib_inline.backend_inline",
 }
+
+
+_SONGTI_FONT_CANDIDATES = [
+    "SimSun",
+    "宋体",
+    "NSimSun",
+    "新宋体",
+    "Songti SC",
+    "Noto Serif CJK SC",
+    "Noto Serif CJK JP",
+    "Source Han Serif SC",
+    "DejaVu Serif",
+]
+
+
+def configure_songti_font() -> None:
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    selected = next(
+        (name for name in _SONGTI_FONT_CANDIDATES if name in available),
+        "DejaVu Serif",
+    )
+    plt.rcParams["font.family"] = [selected]
+    plt.rcParams["font.serif"] = [selected, "DejaVu Serif"]
+    plt.rcParams["font.sans-serif"] = [selected, "DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
 
 
 def _can_show_interactive_figure() -> bool:
@@ -128,37 +154,47 @@ def plot_detection_scores(
     split_idx: int,
     save_path: str | Path,
     *,
-    title: str,
+    title: str | None = None,
     ylabel: str = "重构误差",
     xlabel: str = "测试样本索引",
     figsize: tuple[float, float] = (6, 5),
     dpi: int = 150,
     style: str = "compact",
-    threshold_label_fmt: str = "阈值 ({threshold:.4f})",
+    color_scheme: str = "default",
+    score_label: str = "异常分数",
+    threshold_label_fmt: str = "阈值",
+    split_label: str = "测试集分界",
+    label_fontsize: float = 14,
+    tick_fontsize: float = 12,
+    legend_fontsize: float = 15,
     show: bool = False,
 ) -> None:
+    configure_songti_font()
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     can_show = _can_show_interactive_figure() if show else False
 
     fig, ax = plt.subplots(figsize=figsize)
     x_axis = np.arange(1, len(scores) + 1)
+    mra_score_color = "#0B6E4F"
+    mra_threshold_color = "#D1495B"
+    mra_split_color = "#222222"
 
     if style == "mra":
-        ax.plot(x_axis, scores, color="#0B6E4F", linewidth=1.6, label="异常分数")
+        ax.plot(x_axis, scores, color=mra_score_color, linewidth=1.6, label=score_label)
         ax.axhline(
             threshold,
-            color="#D1495B",
+            color=mra_threshold_color,
             linestyle="--",
             linewidth=1.4,
             label=threshold_label_fmt.format(threshold=threshold),
         )
         ax.axvline(
             split_idx,
-            color="#222222",
+            color=mra_split_color,
             linestyle="--",
             linewidth=1.2,
-            label="正常/异常分界",
+            label=split_label,
         )
         if split_idx > 0:
             ax.fill_between(
@@ -175,23 +211,40 @@ def plot_detection_scores(
                 alpha=0.08,
                 color="#E76F51",
             )
-        ax.set_xlabel("窗口索引")
-        ax.set_ylabel("分数")
+        ax.set_xlabel("窗口索引", fontsize=label_fontsize)
+        ax.set_ylabel("分数", fontsize=label_fontsize)
     else:
-        ax.plot(scores, label="测试异常分数", alpha=0.7)
+        use_mra_colors = color_scheme == "mra"
+        ax.plot(
+            scores,
+            color=mra_score_color if use_mra_colors else None,
+            linewidth=1.6 if use_mra_colors else None,
+            label=score_label,
+            alpha=0.7,
+        )
         ax.axhline(
             y=threshold,
-            color="r",
+            color=mra_threshold_color if use_mra_colors else "r",
             linestyle="--",
+            linewidth=1.4 if use_mra_colors else None,
             label=threshold_label_fmt.format(threshold=threshold),
         )
-        ax.axvline(x=split_idx, color="g", linestyle=":", label="测试集分界")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
+        ax.axvline(
+            x=split_idx,
+            color=mra_split_color if use_mra_colors else "g",
+            linestyle="--" if use_mra_colors else ":",
+            linewidth=1.2 if use_mra_colors else None,
+            label=split_label,
+        )
+        ax.set_xlabel(xlabel, fontsize=label_fontsize)
+        ax.set_ylabel(ylabel, fontsize=label_fontsize)
 
-    ax.set_title(title)
+    if title:
+        ax.set_title(title, fontsize=label_fontsize + 1)
+    ax.tick_params(axis="both", labelsize=tick_fontsize)
     ax.grid(True, alpha=0.3 if style != "mra" else 0.2)
-    ax.legend(loc="upper left" if style == "mra" else None)
+    legend_loc = "upper left" if style == "mra" or color_scheme == "mra" else None
+    ax.legend(loc=legend_loc, fontsize=legend_fontsize)
     fig.tight_layout()
     fig.savefig(save_path, dpi=dpi)
     print(f"\nPlot saved to: {save_path}")
