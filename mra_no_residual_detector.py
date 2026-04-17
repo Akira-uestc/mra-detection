@@ -56,13 +56,13 @@ class LossWeights:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GCN + 频域双专家门控插补，并将补全结果送入 Transformer 做无监督异常检测。"
+        description="GCN + 频域双专家门控插补，并将补全结果送入无残差捷径 Transformer 做无监督异常检测。"
     )
     parser.add_argument("--train-glob", default="data/train/train_1.csv")
     parser.add_argument("--test-glob", default="data/test/test_C5_1.csv")
     parser.add_argument(
         "--output-dir",
-        default="outputs/gcn_freq_fusion_transformer_detection",
+        default="outputs/gcn_freq_fusion_transformer_no_residual_detection",
     )
     parser.add_argument("--seq-len", type=int, default=50)
     parser.add_argument("--stride", type=int, default=1)
@@ -463,8 +463,7 @@ class SamplingAwareTransformerAD(nn.Module):
         ).unsqueeze(0)
 
         encoded = self.encoder(tokens)
-        delta = self.reconstruction_head(encoded)
-        return x_complete + delta
+        return self.reconstruction_head(encoded)
 
 
 class FusionAnomalyModel(nn.Module):
@@ -1076,6 +1075,8 @@ def main() -> None:
     prediction_df.to_csv(output_dir / "test_predictions.csv", index=False)
 
     summary = {
+        "experiment": "gcn_freq_fusion_transformer_no_residual_detection",
+        "detector_type": "sampling_aware_transformer_direct_reconstruction",
         "device": str(device),
         "config": vars(args),
         "loss_weights": asdict(loss_weights),
@@ -1102,7 +1103,11 @@ def main() -> None:
         threshold=threshold,
         split_idx=test_split_idx,
         save_path=output_dir / "anomaly_scores.png",
-        color_scheme="mra",
+        title="GCN + 频域门控融合无残差 Transformer 异常检测",
+        style="mra",
+        figsize=(16, 5),
+        dpi=180,
+        threshold_label_fmt="阈值 = {threshold:.4f}",
     )
 
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
