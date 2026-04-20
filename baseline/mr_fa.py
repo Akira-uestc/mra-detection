@@ -24,7 +24,12 @@ from utils.methods.windowing import (
 )
 
 plt.rcParams["font.family"] = ["SimSun"]
-plt.rcParams["font.sans-serif"] = ["SimSun", "SimSun-ExtB", "Noto Serif CJK JP", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = [
+    "SimSun",
+    "SimSun-ExtB",
+    "Noto Serif CJK JP",
+    "DejaVu Sans",
+]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -40,6 +45,7 @@ class RateGroup:
     interval: int
     train_mask: np.ndarray
 
+
 def fit_standardizer(train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     means = np.nanmean(train_data, axis=0)
     stds = np.nanstd(train_data, axis=0)
@@ -47,7 +53,9 @@ def fit_standardizer(train_data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return means, stds
 
 
-def transform_observed(data: np.ndarray, means: np.ndarray, stds: np.ndarray) -> np.ndarray:
+def transform_observed(
+    data: np.ndarray, means: np.ndarray, stds: np.ndarray
+) -> np.ndarray:
     transformed = (data - means) / stds
     transformed[np.isnan(data)] = np.nan
     return transformed
@@ -65,7 +73,9 @@ def infer_rate_groups(train_data: np.ndarray) -> list[RateGroup]:
         ref_mask = mask[:, columns[0]]
         for column_idx in columns[1:]:
             if not np.array_equal(ref_mask, mask[:, column_idx]):
-                raise ValueError("Columns in the same rate group do not share the same observation mask.")
+                raise ValueError(
+                    "Columns in the same rate group do not share the same observation mask."
+                )
 
         observed_idx = np.flatnonzero(ref_mask)
         if len(observed_idx) <= 1:
@@ -86,19 +96,29 @@ def infer_rate_groups(train_data: np.ndarray) -> list[RateGroup]:
     return groups
 
 
-def infer_row_patterns(data: np.ndarray, groups: list[RateGroup]) -> tuple[np.ndarray, dict[tuple[bool, ...], np.ndarray]]:
+def infer_row_patterns(
+    data: np.ndarray, groups: list[RateGroup]
+) -> tuple[np.ndarray, dict[tuple[bool, ...], np.ndarray]]:
     phi = np.column_stack([~np.isnan(data[:, group.columns[0]]) for group in groups])
     pattern_to_indices: dict[tuple[bool, ...], list[int]] = {}
 
     for row_idx, pattern in enumerate(phi):
-        pattern_to_indices.setdefault(tuple(bool(flag) for flag in pattern.tolist()), []).append(row_idx)
+        pattern_to_indices.setdefault(
+            tuple(bool(flag) for flag in pattern.tolist()), []
+        ).append(row_idx)
 
-    return phi, {pattern: np.asarray(indices, dtype=int) for pattern, indices in pattern_to_indices.items()}
+    return phi, {
+        pattern: np.asarray(indices, dtype=int)
+        for pattern, indices in pattern_to_indices.items()
+    }
+
 
 def prepare_data(
     seq_len: int = 60,
     stride: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[RateGroup], int]:
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[RateGroup], int
+]:
     data_dir = PROJECT_ROOT / "data"
     train_pattern = "train_*.csv"
     test_pattern = "test_*.csv"
@@ -135,7 +155,15 @@ def prepare_data(
     )
     groups = infer_rate_groups(train_scaled)
 
-    return train_scaled, test_scaled, x_train, x_test, test_labels, groups, train_raw.shape[1]
+    return (
+        train_scaled,
+        test_scaled,
+        x_train,
+        x_test,
+        test_labels,
+        groups,
+        train_raw.shape[1],
+    )
 
 
 class MultirateFactorAnalysis:
@@ -158,7 +186,9 @@ class MultirateFactorAnalysis:
         self.train_loss_history_: list[float] = []
         self.loglik_history_: list[float] = []
 
-    def fit(self, data: np.ndarray, groups: list[RateGroup]) -> "MultirateFactorAnalysis":
+    def fit(
+        self, data: np.ndarray, groups: list[RateGroup]
+    ) -> "MultirateFactorAnalysis":
         train_rows = self._prepare_training_rows(data)
         self.groups = groups
         self._initialize_parameters(train_rows)
@@ -191,7 +221,11 @@ class MultirateFactorAnalysis:
         _, pattern_to_indices = infer_row_patterns(data, self.groups)
 
         for pattern, indices in pattern_to_indices.items():
-            observed_groups = [group_idx for group_idx, is_observed in enumerate(pattern) if is_observed]
+            observed_groups = [
+                group_idx
+                for group_idx, is_observed in enumerate(pattern)
+                if is_observed
+            ]
             if not observed_groups:
                 continue
 
@@ -201,10 +235,14 @@ class MultirateFactorAnalysis:
 
             sign, logdet = np.linalg.slogdet(covariance)
             if sign <= 0:
-                raise np.linalg.LinAlgError("Observed covariance is not positive definite.")
+                raise np.linalg.LinAlgError(
+                    "Observed covariance is not positive definite."
+                )
 
             covariance_inv = np.linalg.inv(covariance)
-            quad_form = np.sum((observed_matrix @ covariance_inv) * observed_matrix, axis=1)
+            quad_form = np.sum(
+                (observed_matrix @ covariance_inv) * observed_matrix, axis=1
+            )
             dim = observed_matrix.shape[1]
             scores[indices] = -0.5 * (dim * np.log(2.0 * np.pi) + logdet + quad_form)
 
@@ -248,7 +286,9 @@ class MultirateFactorAnalysis:
         if data.ndim == 3:
             num_rows = data.shape[0] * data.shape[1]
             return data.reshape(num_rows, data.shape[2])
-        raise ValueError(f"Unsupported training data ndim={data.ndim}, expected 2 or 3.")
+        raise ValueError(
+            f"Unsupported training data ndim={data.ndim}, expected 2 or 3."
+        )
 
     def _initialize_parameters(self, data: np.ndarray) -> None:
         rng = np.random.default_rng(self.random_state)
@@ -264,13 +304,23 @@ class MultirateFactorAnalysis:
     def _posterior(self, data: np.ndarray) -> dict[str, np.ndarray]:
         num_rows = data.shape[0]
         means = np.zeros((num_rows, self.n_factors), dtype=np.float64)
-        precisions = np.zeros((num_rows, self.n_factors, self.n_factors), dtype=np.float64)
-        covariances = np.zeros((num_rows, self.n_factors, self.n_factors), dtype=np.float64)
-        second_moments = np.zeros((num_rows, self.n_factors, self.n_factors), dtype=np.float64)
+        precisions = np.zeros(
+            (num_rows, self.n_factors, self.n_factors), dtype=np.float64
+        )
+        covariances = np.zeros(
+            (num_rows, self.n_factors, self.n_factors), dtype=np.float64
+        )
+        second_moments = np.zeros(
+            (num_rows, self.n_factors, self.n_factors), dtype=np.float64
+        )
         phi, pattern_to_indices = infer_row_patterns(data, self.groups)
 
         for pattern, indices in pattern_to_indices.items():
-            observed_groups = [group_idx for group_idx, is_observed in enumerate(pattern) if is_observed]
+            observed_groups = [
+                group_idx
+                for group_idx, is_observed in enumerate(pattern)
+                if is_observed
+            ]
             precision = np.eye(self.n_factors, dtype=np.float64)
 
             for group_idx in observed_groups:
@@ -285,7 +335,9 @@ class MultirateFactorAnalysis:
             for group_idx in observed_groups:
                 group = self.groups[group_idx]
                 x_group = data[np.ix_(indices, group.columns)]
-                rhs += (x_group / self.noise_vars_[group_idx]) @ self.loadings_[group_idx]
+                rhs += (x_group / self.noise_vars_[group_idx]) @ self.loadings_[
+                    group_idx
+                ]
 
             means[indices] = rhs @ covariance
             precisions[indices] = precision
@@ -302,7 +354,9 @@ class MultirateFactorAnalysis:
             "phi": phi,
         }
 
-    def _m_step(self, data: np.ndarray, means: np.ndarray, second_moments: np.ndarray) -> None:
+    def _m_step(
+        self, data: np.ndarray, means: np.ndarray, second_moments: np.ndarray
+    ) -> None:
         eye = np.eye(self.n_factors) * self.min_noise
 
         for group_idx, group in enumerate(self.groups):
@@ -325,7 +379,9 @@ class MultirateFactorAnalysis:
     def _pattern_covariance(self, observed_groups: list[int]) -> np.ndarray:
         loadings = [self.loadings_[group_idx] for group_idx in observed_groups]
         block_loadings = np.vstack(loadings)
-        block_noise = np.concatenate([self.noise_vars_[group_idx] for group_idx in observed_groups])
+        block_noise = np.concatenate(
+            [self.noise_vars_[group_idx] for group_idx in observed_groups]
+        )
         covariance = block_loadings @ block_loadings.T + np.diag(block_noise)
         return covariance
 
@@ -347,15 +403,23 @@ class MultirateFactorAnalysis:
         residual = np.nan_to_num(data, nan=0.0) - reconstruction
         return float(np.mean(np.square(residual[observed])))
 
-    def _stack_observed_rows(self, data: np.ndarray, observed_groups: list[int]) -> np.ndarray:
-        blocks = [data[:, self.groups[group_idx].columns] for group_idx in observed_groups]
+    def _stack_observed_rows(
+        self, data: np.ndarray, observed_groups: list[int]
+    ) -> np.ndarray:
+        blocks = [
+            data[:, self.groups[group_idx].columns] for group_idx in observed_groups
+        ]
         return np.concatenate(blocks, axis=1)
 
 
 def t2_control_limit(num_factors: int, num_samples: int, alpha: float) -> float:
     if num_samples <= num_factors + 1:
         return np.inf
-    scale = num_factors * (num_samples**2 - 1.0) / (num_samples * (num_samples - num_factors))
+    scale = (
+        num_factors
+        * (num_samples**2 - 1.0)
+        / (num_samples * (num_samples - num_factors))
+    )
     return float(scale * f.ppf(alpha, num_factors, num_samples - num_factors))
 
 
@@ -391,6 +455,7 @@ def score_window_dataset(
 
     return row_scores.reshape(num_windows, seq_len).mean(axis=1)
 
+
 def train_model() -> None:
     seq_len = 50
     stride = 1
@@ -398,9 +463,11 @@ def train_model() -> None:
     alpha = 0.99
     max_iter = 80
 
-    train_data, test_data, x_train, x_test, test_labels, groups, num_features = prepare_data(
-        seq_len=seq_len,
-        stride=stride,
+    train_data, test_data, x_train, x_test, test_labels, groups, num_features = (
+        prepare_data(
+            seq_len=seq_len,
+            stride=stride,
+        )
     )
 
     print("\nInferred multirate groups:")
@@ -428,14 +495,18 @@ def train_model() -> None:
     train_monitor = model.monitor(train_data)
     t2_limit = t2_control_limit(latent_dim, train_data.shape[0], alpha)
     spe_limits = np.array(
-        [spe_control_limit(train_monitor["spe"][:, group_idx], alpha) for group_idx in range(len(groups))]
+        [
+            spe_control_limit(train_monitor["spe"][:, group_idx], alpha)
+            for group_idx in range(len(groups))
+        ]
     )
 
     train_scores = score_window_dataset(model, x_train, t2_limit, spe_limits)
     test_scores = score_window_dataset(model, x_test, t2_limit, spe_limits)
     if USE_EWAF:
         train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
-    threshold = choose_threshold(train_scores, method="mean")
+    # threshold = choose_threshold(train_scores, method="mean")
+    threshold = choose_threshold(train_scores, method="gaussian_quantile_max")
 
     y_true = test_labels
     split_idx = split_index_from_labels(y_true)
@@ -450,9 +521,13 @@ def train_model() -> None:
     print("\n--- 异常检测评估结果 ---")
     print(f"Latent factors: {latent_dim}")
     print(f"Window size: {seq_len}, stride: {stride}, num_features={num_features}")
-    print(f"Train score: mean={np.mean(train_scores):.6f}, std={np.std(train_scores):.6f}")
+    print(
+        f"Train score: mean={np.mean(train_scores):.6f}, std={np.std(train_scores):.6f}"
+    )
     print(f"Threshold (mean train score): {threshold:.6f}")
-    print(f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly")
+    print(
+        f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly"
+    )
     print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
     metrics = compute_binary_classification_metrics(y_true, y_pred)
